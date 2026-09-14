@@ -1,0 +1,9 @@
+# LF everywhere: canonical hashes, generated files, and the sh pre-commit hook must be
+# byte-identical on Windows and Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary

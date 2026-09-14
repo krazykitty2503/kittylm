@@ -1,0 +1,18 @@
+#!/bin/sh
+# KittyLM pre-commit hook: secret scan + artifact guard on staged files.
+# Enabled per clone with:  git config core.hooksPath .githooks
+# CI runs the same checks on every push, so bypassing this hook does not bypass the rules.
+
+if [ -n "$KITTYLM_PYTHON" ]; then
+    PY="$KITTYLM_PYTHON"
+elif [ -x ".venv/Scripts/python.exe" ]; then
+    PY=".venv/Scripts/python.exe"
+elif [ -x ".venv/bin/python" ]; then
+    PY=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+else
+    PY="python"
+fi
+
+exec "$PY" scripts/check.py hook

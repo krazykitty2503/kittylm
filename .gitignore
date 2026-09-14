@@ -1,0 +1,46 @@
+# --- Python / tooling ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Secrets and credentials (never committed) --------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Data: only manifests and hand-written eval samples are committed ---------
+data/raw/
+data/cleaned/
+data/tokenized/
+
+# --- Runs, checkpoints, weights, samples, logs (never committed) --------------
+runs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.bin
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# --- OS / editor noise ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
