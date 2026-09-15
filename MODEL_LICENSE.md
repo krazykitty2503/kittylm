@@ -2,8 +2,7 @@
 
 **No KittyLM model weights have been trained or released yet.**
 
-When weights are released, they are licensed under the **Apache License, Version 2.0**
-(see [LICENSE](LICENSE)), the same license as the code.
+Any KittyLM model weights released by the project will be licensed under the Apache License, Version 2.0
 
 Every released checkpoint will be accompanied by:
 
