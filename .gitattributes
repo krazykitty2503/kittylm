@@ -1,9 +1,31 @@
 # LF everywhere: canonical hashes, generated files, and the sh pre-commit hook must be
+
 # byte-identical on Windows and Linux.
+
 * text=auto eol=lf
+
+# Images and other binary assets
 
 *.png binary
 *.jpg binary
+*.jpeg binary
 *.gif binary
 *.ico binary
+*.webp binary
 *.pdf binary
+
+# Model weights and binary data artifacts
+
+*.pt binary
+*.pth binary
+*.ckpt binary
+*.safetensors binary
+*.gguf binary
+*.bin binary
+*.npy binary
+*.npz binary
+*.pkl binary
+*.pickle binary
+*.sqlite binary
+*.sqlite3 binary
+*.db binary
