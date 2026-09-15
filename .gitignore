@@ -1,5 +1,6 @@
 # --- Python / tooling ---------------------------------------------------------
-__pycache__/
+
+**pycache**/
 *.py[cod]
 *.egg-info/
 build/
@@ -10,19 +11,26 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# --- Secrets and credentials (never committed) --------------------------------
+# --- Secrets and credentials (never committed) -------------------------------
+
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+*.secret
+*.secret.*
+secrets/
+credentials/
 
-# --- Data: only manifests and hand-written eval samples are committed ---------
+# --- Data: only manifests and hand-written eval samples are committed --------
+
 data/raw/
 data/cleaned/
 data/tokenized/
 
-# --- Runs, checkpoints, weights, samples, logs (never committed) --------------
+# --- Runs, checkpoints, weights, samples, logs (never committed) -------------
+
 runs/
 *.pt
 *.pth
@@ -40,6 +48,7 @@ runs/
 *.log
 
 # --- OS / editor noise ---------------------------------------------------------
+
 .DS_Store
 Thumbs.db
 .idea/
