@@ -12,28 +12,25 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "KrazyKitty" }]
 
-# Runtime dependencies are lower-bounded, not pinned. Local development may use a
-
-# ROCm-enabled PyTorch build; CI installs the CPU build appropriate to its environment.
-
+# Runtime dependencies are lower-bounded rather than pinned.
+# Local development may use a ROCm-enabled PyTorch build;
+# CI installs the CPU-compatible build for its environment.
 dependencies = [
-"torch>=2.4",
-"numpy>=1.26",
-"pyyaml>=6.0",
-"regex>=2024.0",
+    "torch>=2.4",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "regex>=2024.0",
 ]
 
 [project.optional-dependencies]
-
-# Development tools are pinned exactly so formatting, linting, type-checking and
-
-# security-audit results remain stable between local runs and CI. Dependabot proposes updates.
-
+# Development tools are pinned so local and CI checks remain reproducible.
+# Dependabot can propose updates.
 dev = [
-"pytest==9.1.1",
-"ruff==0.16.7",
-"mypy==2.3.1",
-"pip-audit==2.10.1",
+    "pytest==9.1.1",
+    "ruff==0.16.7",
+    "mypy==2.3.1",
+    "pip-audit==2.10.1",
+    "build==1.3.0",
 ]
 
 [project.urls]
@@ -48,7 +45,7 @@ include = ["kittylm*"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
-"gpu: requires a ROCm/CUDA GPU; run locally with `pytest -m gpu`, never in CI",
+    "gpu: requires a ROCm/CUDA GPU; run locally with `pytest -m gpu`, never in CI",
 ]
 
 [tool.ruff]
