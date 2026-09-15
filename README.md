@@ -6,6 +6,11 @@ KittyLM is a personal language-model research platform within **KittyOS**, creat
 ```text
 tokenizer → dataset → model → training → evaluation → post-training → tools/agents → KittyOS
 ```
+What is KittyLM?
+
+KittyLM is KrazyKitty's from-scratch language-model research project. The goal is not to immediately produce a competitive assistant, but to understand and measure each layer of an LLM system by implementing the stack locally and recording reproducible experiments.
+
+KittyLM is designed as a research component of the broader KittyOS ecosystem. The project prioritizes reproducibility, security, explicit provenance, and measured results over model size or benchmark chasing.
 
 **Guiding principle:** build it → measure it → understand it → improve it.
 **Scope principle for 0.1:** build the hooks now; implement the heavy systems later.
