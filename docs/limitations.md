@@ -26,4 +26,17 @@ design.
 
 ## Measured limitations
 
+- **Batch-1 decode speed is overhead-bound on ROCm/Windows.** Nano (bf16, RX 9060 XT) measured
+  about 17,000-20,500 prefill tokens/s but only about 170-200 decode tokens/s: each decode step
+  launches every kernel from Python for a single token. These are engineering measurements from
+  `pytest -m gpu`, not experiment records, and vary with driver and load.
+- **bf16 sampling is not bit-reproducible across decoding paths.** Cached and full-forward bf16
+  decoding differ by bf16 rounding (max logit deviation 1.6e-2 measured); with sampling this can
+  change a draw, after which the continuations differ. Greedy decoding matched exactly in the
+  measured run; fp32 decoding agrees within 1.4e-6.
+- **Windowed evaluation of long streams** (D-023): predictions right after a context reset see
+  only half a context of history.
+
+Experiment-level limitations are added from records at step 12.
+
 To be filled from experiment records at step 12.

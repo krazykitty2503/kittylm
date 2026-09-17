@@ -4,6 +4,8 @@
   independent of how it is trained or what data it sees.
 - kittylm.tokenizer must never import torch: tokenization is plain Python and testable
   without a deep-learning stack.
+- kittylm.evaluation must never import kittylm.training: evaluation measures a model, not a
+  training run.
 
 There is deliberately no ban on network-module imports (see docs/safety.md).
 """
@@ -20,6 +22,8 @@ from tests.conftest import ROOT
 RULES: dict[str, tuple[str, ...]] = {
     "kittylm/model": ("kittylm.training", "kittylm.data"),
     "kittylm/tokenizer": ("torch",),
+    # Measurements must not depend on how a model was trained (loading lives in inference).
+    "kittylm/evaluation": ("kittylm.training",),
 }
 
 

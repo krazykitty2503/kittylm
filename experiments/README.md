@@ -30,7 +30,7 @@ committed.
 | ID | Kind | Purpose | Status |
 |---|---|---|---|
 | BENCH-ATTN-001 | benchmark | ROCm attention paths × sequence lengths: throughput, VRAM, failures (Milestone B) | **done** — `BENCH-ATTN-001/benchmark.yaml`; decided D-014 (`reference@bf16`, flag unset) |
-| SMOKE-GPU-001 | smoke | Engineering-only GPU overfit test with a 512 smoke tokenizer; never a model-quality result (Milestone E, D-017) | not run |
+| SMOKE-GPU-001 | smoke | Engineering-only GPU overfit test with a 512 smoke tokenizer; never a model-quality result (Milestone E, D-017). Gate: `kittylm.evaluation.gates` with D-023 windows | not run |
 | EXP-000 | formal | Overfit gate: Nano model memorizes a tiny fixture with the real 16,384 tokenizer | not run |
 | EXP-001 | formal | Baseline dense Transformer, vocab 16,384 | not run |
 | EXP-001-v08k / v12k / v24k / v32k | formal | Vocabulary ablation at equal non-embedding size and training bytes | not run |

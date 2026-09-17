@@ -79,7 +79,7 @@ Export, KittyOS integration and the feedback loop are architectural boundaries o
 | Ledger schema v2 (record kinds, benchmark schema) | `kittylm/ledger.py` | B | implemented, tested |
 | Training engine, checkpoints, resume harness | `kittylm/training/`, `kittylm/data/loader.py` | C | implemented, tested (CPU bit-exact; GPU measured) |
 | CI evidence (`verify_ci.py`) | `scripts/verify_ci.py`, `kittylm/ledger.py` | C | implemented, tested |
-| Evaluation + generation | `kittylm/evaluation/`, `kittylm/inference/` | D | not started |
+| Evaluation (windows, ppl/bpb, overfit gate, speed) + generation | `kittylm/evaluation/`, `kittylm/inference/`, `scripts/evaluate.py`, `scripts/generate.py` | D | implemented, tested (CPU + GPU; offline end-to-end) |
 | SMOKE-GPU-001 (engineering-only) | `experiments/SMOKE-GPU-001/` | E | not started |
 | Data pipeline + `local-v1` | `kittylm/data/` | F | not started |
 | Synthetic generators | `kittylm/synthetic/` | `local-v2` | deferred (D-016) |
@@ -157,3 +157,20 @@ Export, KittyOS integration and the feedback loop are architectural boundaries o
   optimizer moments and step counts, scheduler step, global step and tokens seen, every RNG state
   and the loader's generator). The harness proves it by resuming in a fresh process and comparing
   all of these with an uninterrupted run.
+- **Windowing** (D-023): a stream longer than the context is split into windows starting at
+  multiples of half the context. Each window scores only targets no earlier window scored, and
+  generation resets its KV cache at the same starts, so every prediction sees the same history in
+  evaluation, in the overfit gate and during generation.
+- **Loss, perplexity, bits-per-byte** (D-024): loss is mean nats per predicted token; perplexity
+  is `exp(loss)`, "how many equally likely choices" the model is effectively choosing between;
+  bits-per-byte converts total NLL to bits and divides by the text bytes, which removes the
+  tokenizer from the comparison. Totals are summed before dividing, so every token counts once.
+- **Sampling**: temperature divides logits (below 1 sharpens, above 1 flattens); top-k keeps the
+  k most likely tokens; top-p keeps the smallest most-likely set whose probability reaches p.
+  Temperature 0 is greedy argmax. Generation stops at `<|endoftext|>` or the token budget.
+- **KV cache in generation**: prefill runs the prompt once and stores keys/values; each decode
+  step then processes one token. Prefill is parallel and fast; batch-1 decode is dominated by the
+  fixed cost of launching kernels per token, which is why decode tokens/s is far below prefill.
+- **Overfit gate**: memorizing a tiny fixture (loss < 0.05, greedy continuation >= 95% correct)
+  proves the stack can fit data before any real experiment is trusted; SMOKE-GPU-001 and EXP-000
+  share one implementation.

@@ -11,9 +11,9 @@ guarantee.
 | Test failures cannot print environment secrets | Git/hook test sandboxes strip credential-named environment variables and never render their environment | **implemented** (step 1) |
 | Secrets never enter datasets or manifests | Documents pass license validation and the secret scan before anything is written; hits drop the whole document (D-006) | planned (step 3) |
 | Secrets never enter checkpoints | Fixed top-level and metadata key whitelists enforced on write and load; `weights_only` loading refuses arbitrary objects (D-021) | **implemented** (Milestone C) |
-| Secrets never enter logs or samples | Metrics are numeric only; samples scanned and redacted before saving | planned (Milestone D) |
+| Secrets never enter logs or samples | Metrics are numeric only; generated samples are secret-scanned, flagged lines replaced by rule-name markers, re-scanned, then written atomically; raw text never touches disk (D-024) | **implemented** (Milestone D) |
 | Special tokens cannot be injected from text | Tokenizer never produces special-token ids from raw text unless a name is explicitly allowed; all 32 names, embedded, adjacent, nested and prefix-like forms are tested (D-019) | **implemented** (Milestone A) |
-| No outbound network requests in 0.1 | See below | planned (checked from step 8) |
+| No outbound network requests in 0.1 | See below | **checked** on the tested paths (Milestone D end-to-end test) |
 | No telemetry | KittyLM contains no telemetry code | **true today** (nothing is sent anywhere) |
 | Tool access mediated by KittyOS | The model never touches the OS; see `kittylm/integration/README.md` | design boundary (future) |
 | No automatic learning from feedback | Feedback → human review → curated, versioned dataset (D-009) | design boundary (future) |
@@ -21,8 +21,9 @@ guarantee.
 ## Network behaviour
 
 **KittyLM 0.1 performs no outbound network requests and has no telemetry.** This is checked at
-runtime/integration level where applicable, as defense-in-depth: the end-to-end test (step 8)
-runs the pipeline with outbound socket connections blocked. That check catches accidental
+runtime/integration level where applicable, as defense-in-depth: `tests/test_end_to_end.py`
+runs tokenizer training, model training, checkpointing, the evaluation and generation CLIs and
+the overfit gate on CPU with outbound socket connections blocked. That check catches accidental
 network use on the tested paths; it is **not** proof that no code path can ever make a request.
 
 There is deliberately **no** ban on importing network modules, so future KittyOS integration is
