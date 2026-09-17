@@ -2,21 +2,22 @@
 
 Purpose:
     Run optimizer steps on a model and keep *everything* needed to continue the run exactly:
-    model weights, optimizer moments, schedule step, loss scaler, counters, every RNG state and
-    the data sampler's generator. One optimizer step draws ``gradient_accumulation``
-    micro-batches, averages their losses, backpropagates, clips the global gradient norm, and
-    updates the weights at the scheduled learning rate. The engine also refuses to start a
-    formal experiment without green required CI on the exact commit (D-018), refuses a model
-    whose parameter accounting does not add up, and stops with a ``crash`` checkpoint on
-    non-finite loss or gradients instead of silently continuing.
+    model weights, optimizer moments, schedule step, loss scaler, counters, the best validation
+    loss, every RNG state and the data sampler's generator. One optimizer step draws
+    ``gradient_accumulation`` micro-batches, averages their losses, backpropagates, clips the
+    global gradient norm, and updates the weights at the scheduled learning rate. The engine also
+    refuses to start a formal experiment without green required CI on the exact commit (D-018),
+    refuses a model whose parameter accounting does not add up, and stops with a ``crash``
+    checkpoint on non-finite loss or gradients instead of silently continuing.
 
 Public API:
     RunInfo(kind, experiment_id, git_commit, git_dirty, ci_evidence)
-    TrainingEngine(model, model_config, training_config, sampler, device, run_dir, identity, run)
-        ``train_step()``, ``train(until_step)``, ``validate(batches)``, ``state_dict()``,
+    TrainingEngine(model, model_config, training_config, sampler, device, run_dir, identity, run,
+                   validation_batches=None)
+        ``train_step()``, ``train(until_step)``, ``validate(batches=None)``, ``state_dict()``,
         ``load_state_dict(state)``, ``save_checkpoint()``, ``resume_latest()``, ``summary()``;
-        ``global_step``, ``tokens_seen``, ``history``.
-    StepResult, NonFiniteError, CiGateError
+        ``global_step``, ``tokens_seen``, ``skipped_steps``, ``best_val_loss``, ``history``.
+    StepResult, NonFiniteError, CiGateError, MAX_CONSECUTIVE_SKIPS
 
 Shapes:
     Micro-batches ``[batch_size, context_length]``; logits ``[B, T, vocab]``.
@@ -30,11 +31,25 @@ Device:
 
 Math:
     ``loss_step = (1/A) * sum_a CE(micro_a)``; ``g <- clip(g, grad_clip)`` by global L2 norm;
-    AdamW update with ``lr = schedule(step)``.
+    AdamW update with ``lr = schedule(step)``. Validation loss is the token-weighted mean
+    ``sum_b CE_b * tokens_b / sum_b tokens_b``, so a smaller final batch is not over-weighted.
 
 Invariants:
-    - ``global_step`` equals the schedule step and the number of completed optimizer steps.
+    - ``global_step`` equals the schedule step, the number of *applied* optimizer updates and
+      ``len(history)`` for an engine that has not resumed.
     - ``tokens_seen = global_step * batch_size * gradient_accumulation * context_length``.
+    - fp16 only: when the loss scaler finds inf/NaN gradients it skips the update. A skipped
+      attempt consumes its micro-batches (the sampler does not rewind), increments
+      ``skipped_steps``, is written to ``train.log``, and changes neither the schedule,
+      ``global_step``, ``tokens_seen`` nor ``history``; ``train()`` then retries with the next
+      batches. ``MAX_CONSECUTIVE_SKIPS`` skips in a row stop the run with NonFiniteError.
+    - A ``crash`` checkpoint holds the state *before* the failed step: model, optimizer,
+      schedule and counters are unchanged, and the loader and RNG states are the snapshots
+      taken before the step drew its first micro-batch, so resuming it replays the failing batch.
+    - ``validate()`` replaces ``best_val`` only when the loss beats ``best_val_loss``, which is
+      checkpointed, so a resumed run never replaces a better pre-interruption model.
+    - With ``eval_every > 0`` the engine validates on its fixed validation batches after every
+      ``eval_every``-th applied step.
     - Resuming from ``state_dict()`` in a fresh process continues bit-exactly on CPU in
       deterministic mode (validated by ``resume_harness``).
     - Checkpoint metadata contains only whitelisted identity fields.
@@ -42,13 +57,14 @@ Invariants:
 Failure modes:
     - ``CiGateError``: formal run without valid ``ci_evidence`` for ``git_commit``.
     - ``AccountingError``: parameter categories do not sum to the total.
-    - ``NonFiniteError``: non-finite loss or gradient norm (fp32/bf16; with fp16 the loss
-      scaler skips overflowing steps instead). A ``crash`` checkpoint holding the pre-update state
-      is written first.
+    - ``ValueError``: ``eval_every > 0`` without validation batches; ``train(until_step)`` beyond
+      ``max_steps`` (never silently clamped).
+    - ``NonFiniteError``: non-finite loss, non-finite gradient norm without a loss scaler, or
+      ``MAX_CONSECUTIVE_SKIPS`` consecutive fp16 skips. A ``crash`` checkpoint is written first.
     - ``CheckpointError``: a resume checkpoint is damaged or belongs to another run.
 
 See:
-    D-012, D-014, D-018, plan rev 3.3 section 4.
+    D-012, D-014, D-018, D-021, plan rev 3.3 section 4.
 """
 
 from __future__ import annotations
@@ -80,7 +96,18 @@ from kittylm.training.precision import make_precision
 from kittylm.training.schedule import WarmupCosineSchedule
 from kittylm.training.timing import StepTimer, ThroughputMeter
 
-__all__ = ["CiGateError", "NonFiniteError", "RunInfo", "StepResult", "TrainingEngine"]
+__all__ = [
+    "MAX_CONSECUTIVE_SKIPS",
+    "CiGateError",
+    "NonFiniteError",
+    "RunInfo",
+    "StepResult",
+    "TrainingEngine",
+]
+
+# fp16 scales start at 2**16 and halve on every overflow, so 30 consecutive skips means the
+# gradients are non-finite regardless of scale.
+MAX_CONSECUTIVE_SKIPS = 30
 
 
 class NonFiniteError(RuntimeError):
@@ -104,7 +131,7 @@ class RunInfo:
 
 @dataclass(frozen=True)
 class StepResult:
-    """Outcome of one optimizer step."""
+    """Outcome of one optimizer-step attempt (``skipped`` only for fp16 overflow)."""
 
     step: int
     loss: float
@@ -112,6 +139,7 @@ class StepResult:
     grad_norm: float
     tokens_seen: int
     batch_starts: list[list[int]] = field(default_factory=list)
+    skipped: bool = False
 
 
 class TrainingEngine:
@@ -128,6 +156,7 @@ class TrainingEngine:
         run_dir: Path,
         identity: RunIdentity,
         run: RunInfo,
+        validation_batches: list[Batch] | None = None,
     ) -> None:
         if run.kind == "formal":
             problems = ci_evidence_problems(run.ci_evidence, run.git_commit)
@@ -137,12 +166,15 @@ class TrainingEngine:
                 raise CiGateError("formal run refused: working tree has uncommitted changes")
         if sampler.context_length > model_config.context_length:
             raise ValueError("sampler context_length exceeds the model context_length")
+        if training_config.eval_every > 0 and not validation_batches:
+            raise ValueError("eval_every > 0 requires validation_batches")
         self.parameter_counts = count_parameters(model)  # raises AccountingError if inconsistent
 
         self.config = training_config
         self.model_config = model_config
         self.model = model.to(device)
         self.sampler = sampler
+        self.validation_batches = validation_batches
         self.device = device
         self.identity = identity
         self.run = run
@@ -164,6 +196,8 @@ class TrainingEngine:
         self.throughput = ThroughputMeter(device)
         self.global_step = 0
         self.tokens_seen = 0
+        self.skipped_steps = 0
+        self._consecutive_skips = 0
         self.history: list[StepResult] = []
         self.best_val_loss = math.inf
         self._tokens_since_lap = 0
@@ -196,6 +230,8 @@ class TrainingEngine:
             "scaler": scaler.state_dict() if scaler is not None else None,
             "global_step": self.global_step,
             "tokens_seen": self.tokens_seen,
+            "skipped_steps": self.skipped_steps,
+            "best_val_loss": self.best_val_loss,
             "rng": capture_rng_state(include_cuda=self.device.type == "cuda"),
             "loader": self.sampler.state_dict(),
         }
@@ -205,10 +241,15 @@ class TrainingEngine:
         self.model.load_state_dict(state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.schedule.load_state_dict(state["scheduler"])
-        if self.precision.scaler is not None and state["scaler"] is not None:
-            self.precision.scaler.load_state_dict(state["scaler"])
+        scaler = self.precision.scaler
+        if (scaler is None) != (state["scaler"] is None):
+            raise ValueError("checkpoint loss-scaler state does not match this precision policy")
+        if scaler is not None:
+            scaler.load_state_dict(state["scaler"])
         self.global_step = int(state["global_step"])
         self.tokens_seen = int(state["tokens_seen"])
+        self.skipped_steps = int(state["skipped_steps"])
+        self.best_val_loss = float(state["best_val_loss"])
         if self.schedule.step != self.global_step:
             raise ValueError("checkpoint scheduler step does not match global_step")
         self.sampler.load_state_dict(state["loader"])
@@ -232,12 +273,26 @@ class TrainingEngine:
     def _to_device(self, batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
         return batch.inputs.to(self.device), batch.targets.to(self.device)
 
+    def _crash(self, pre_step: dict[str, Any], message: str) -> NonFiniteError:
+        """Write the pre-step state as ``crash`` and build the error to raise."""
+        state = self.state_dict()
+        state["loader"] = pre_step["loader"]
+        state["rng"] = pre_step["rng"]
+        self.checkpoints.save_named(state, "crash")
+        self.logger.info(f"{message}; wrote crash checkpoint (pre-step state)")
+        return NonFiniteError(message)
+
     def train_step(self) -> StepResult:
-        """Run one optimizer step (``gradient_accumulation`` micro-batches)."""
+        """Attempt one optimizer step (``gradient_accumulation`` micro-batches)."""
         cfg = self.config
         if not self._throughput_started:
             self.throughput.start()
             self._throughput_started = True
+        # Snapshot what this step is about to consume, so a crash checkpoint can replay it.
+        pre_step = {
+            "loader": self.sampler.state_dict(),
+            "rng": capture_rng_state(include_cuda=self.device.type == "cuda"),
+        }
         self.model.train()
         self.timer.begin_step(self.global_step)
         lr = self.schedule.apply()
@@ -265,21 +320,40 @@ class TrainingEngine:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
             )
             if not math.isfinite(loss_total) or (scaler is None and not math.isfinite(grad_norm)):
-                self.checkpoints.save_named(self.state_dict(), "crash")
-                self.logger.info(
-                    f"non-finite values at step {self.global_step}: loss={loss_total} "
-                    f"grad_norm={grad_norm}; wrote crash checkpoint"
-                )
-                raise NonFiniteError(
+                raise self._crash(
+                    pre_step,
                     f"non-finite loss or gradient norm at step {self.global_step} "
-                    f"(loss={loss_total}, grad_norm={grad_norm})"
+                    f"(loss={loss_total}, grad_norm={grad_norm})",
                 )
+            applied = True
             if scaler is not None:
+                scale_before = scaler.get_scale()
                 scaler.step(self.optimizer)
                 scaler.update()
+                # GradScaler skips optimizer.step() on inf/NaN gradients and then lowers the scale.
+                applied = scaler.get_scale() >= scale_before
             else:
                 self.optimizer.step()
 
+        if not applied:
+            self.skipped_steps += 1
+            self._consecutive_skips += 1
+            self.logger.info(
+                f"fp16 overflow: skipped update at step {self.global_step} "
+                f"(loss scale {scaler.get_scale() if scaler else None}, "
+                f"{self._consecutive_skips} consecutive, {self.skipped_steps} total)"
+            )
+            if self._consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+                raise self._crash(
+                    pre_step,
+                    f"{self._consecutive_skips} consecutive fp16 overflow skips at step "
+                    f"{self.global_step}",
+                )
+            return StepResult(
+                self.global_step, loss_total, lr, grad_norm, self.tokens_seen, starts, skipped=True
+            )
+
+        self._consecutive_skips = 0
         self.schedule.advance()
         self.global_step += 1
         tokens = cfg.batch_size * cfg.gradient_accumulation * self.sampler.context_length
@@ -291,6 +365,8 @@ class TrainingEngine:
 
         if cfg.log_every and self.global_step % cfg.log_every == 0:
             self._log(result)
+        if cfg.eval_every and self.global_step % cfg.eval_every == 0:
+            self.validate()
         if cfg.checkpoint_every and self.global_step % cfg.checkpoint_every == 0:
             self.save_checkpoint()
         return result
@@ -316,26 +392,38 @@ class TrainingEngine:
         self.logger.log_metrics(result.step, metrics)
 
     def train(self, until_step: int) -> list[StepResult]:
-        """Train until ``global_step == until_step`` (at most ``max_steps``)."""
-        target = min(until_step, self.config.max_steps)
+        """Train until ``global_step == until_step``; returns the applied steps only."""
+        if until_step > self.config.max_steps:
+            raise ValueError(
+                f"until_step {until_step} exceeds max_steps {self.config.max_steps}; "
+                "the schedule is not defined beyond max_steps"
+            )
         results = []
-        while self.global_step < target:
-            results.append(self.train_step())
+        while self.global_step < until_step:
+            result = self.train_step()
+            if not result.skipped:
+                results.append(result)
         return results
 
     @torch.no_grad()
-    def validate(self, batches: list[Batch]) -> float:
-        """Mean validation loss over fixed batches; saves ``best_val`` on improvement."""
+    def validate(self, batches: list[Batch] | None = None) -> float:
+        """Token-weighted validation loss; saves ``best_val`` when it beats ``best_val_loss``."""
+        batches = batches if batches is not None else self.validation_batches
         if not batches:
             raise ValueError("validation needs at least one batch")
+        was_training = self.model.training
         self.model.eval()
-        total = 0.0
+        total_loss = 0.0
+        total_tokens = 0
         for batch in batches:
             inputs, targets = self._to_device(batch)
             with self.precision.autocast():
                 logits = self.model(inputs)
-            total += float(causal_lm_loss(logits, targets))
-        loss = total / len(batches)
+            tokens = targets.numel()
+            total_loss += float(causal_lm_loss(logits, targets)) * tokens
+            total_tokens += tokens
+        self.model.train(was_training)
+        loss = total_loss / total_tokens
         self.logger.log_metrics(self.global_step, {"val_loss": loss})
         if loss < self.best_val_loss:
             self.best_val_loss = loss
@@ -349,6 +437,8 @@ class TrainingEngine:
             "parameters": self.parameter_counts.as_dict(),
             "global_step": self.global_step,
             "tokens_seen": self.tokens_seen,
+            "skipped_steps": self.skipped_steps,
+            "best_val_loss": self.best_val_loss if math.isfinite(self.best_val_loss) else None,
             "timing_breakdown": self.timer.summary(),
             "tokens_per_second": (
                 sum(t for t, _ in measured) / len(measured) if measured else None

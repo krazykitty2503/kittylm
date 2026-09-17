@@ -6,18 +6,23 @@ from __future__ import annotations
 import json
 import math
 import random
-from dataclasses import replace
+from collections.abc import Iterator
+from dataclasses import fields, replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
-from kittylm.config import CONFIG_KINDS, ConfigError, load_config_kinds
+from kittylm.config import CONFIG_KINDS, ConfigError, load_config_kinds, to_dict
 from kittylm.data.loader import TrainWindowSampler, open_token_file, validation_batches
 from kittylm.model.transformer import KittyLM
-from kittylm.training.config import TrainingConfig
-from kittylm.training.determinism import capture_rng_state, restore_rng_state
+from kittylm.training.config import FLOAT_FIELDS, TrainingConfig
+from kittylm.training.determinism import (
+    capture_rng_state,
+    configure_determinism,
+    restore_rng_state,
+)
 from kittylm.training.logger import ExperimentLogger
 from kittylm.training.loss import causal_lm_loss
 from kittylm.training.optim import build_optimizer, parameter_groups
@@ -211,6 +216,64 @@ def test_rng_capture_and_restore_is_weights_only_safe(tmp_path: Path) -> None:
 def test_training_config_validation(changes: dict[str, object], message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         replace(TINY_TRAINING, **changes)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("name", FLOAT_FIELDS)
+def test_float_hyperparameters_must_be_finite(name: str, value: float) -> None:
+    # Regression: range checks alone accept inf (e.g. learning_rate=inf, grad_clip=inf) and
+    # every comparison with NaN is False, so e.g. weight_decay=nan passed `< 0`.
+    with pytest.raises(ConfigError, match=f"{name} must be finite"):
+        replace(TINY_TRAINING, **{name: value})  # type: ignore[arg-type]
+
+
+def test_float_fields_list_covers_every_float_hyperparameter() -> None:
+    declared = {f.name for f in fields(TrainingConfig) if f.type in ("float", float)}
+    assert declared == set(FLOAT_FIELDS)
+
+
+def test_nonfinite_values_from_yaml_are_rejected() -> None:
+    from kittylm.config import from_dict
+
+    data = {**to_dict(TINY_TRAINING), "learning_rate": float("nan")}
+    with pytest.raises(ConfigError, match="learning_rate must be finite"):
+        from_dict(TrainingConfig, data)
+
+
+DETERMINISM_FLAGS = {
+    "deterministic": (True, True, False),
+    "semi_deterministic": (False, False, False),
+    "nondeterministic": (False, False, True),
+}
+
+
+def backend_flags() -> tuple[bool, bool, bool]:
+    return (
+        torch.are_deterministic_algorithms_enabled(),
+        bool(torch.backends.cudnn.deterministic),
+        bool(torch.backends.cudnn.benchmark),
+    )
+
+
+@pytest.fixture
+def restore_backend_flags() -> Iterator[None]:
+    saved = backend_flags()
+    yield
+    torch.use_deterministic_algorithms(saved[0])
+    torch.backends.cudnn.deterministic = saved[1]
+    torch.backends.cudnn.benchmark = saved[2]
+
+
+@pytest.mark.parametrize("target", sorted(DETERMINISM_FLAGS))
+@pytest.mark.parametrize("previous", sorted(DETERMINISM_FLAGS))
+def test_determinism_mode_transitions_reset_every_flag(
+    previous: str, target: str, restore_backend_flags: None
+) -> None:
+    # Regression: nondeterministic mode left cudnn.deterministic=True from an earlier
+    # deterministic engine in the same process.
+    configure_determinism(previous)  # type: ignore[arg-type]
+    configure_determinism(target)  # type: ignore[arg-type]
+    assert backend_flags() == DETERMINISM_FLAGS[target]
 
 
 def test_training_kind_is_registered() -> None:

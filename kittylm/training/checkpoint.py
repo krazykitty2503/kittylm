@@ -33,6 +33,8 @@ Invariants:
     - A file either does not exist or is complete: interrupted writes leave only a temporary
       file, which is ignored and cleaned up, and never replace an existing checkpoint.
     - ``latest.json`` only names a completed checkpoint and records its payload sha256.
+    - Step files are content-addressed (``step-XXXXXXXX-<first 16 hex of sha256>.pt``), so a
+      repeated save of the same step can never modify the file ``latest.json`` names.
     - Top-level keys are exactly CHECKPOINT_KEYS; metadata keys are exactly METADATA_KEYS
       (a whitelist: no environment variables, paths, hostnames or credentials).
     - Step checkpoints beyond ``keep_last`` are pruned; the checkpoint named by ``latest.json``
@@ -74,7 +76,7 @@ __all__ = [
 ]
 
 MAGIC = "kittylm-checkpoint"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # 2: best_val_loss, skipped_steps; content-addressed step files
 CHECKPOINT_KEYS = frozenset(
     {
         "metadata",
@@ -84,6 +86,8 @@ CHECKPOINT_KEYS = frozenset(
         "scaler",
         "global_step",
         "tokens_seen",
+        "skipped_steps",
+        "best_val_loss",
         "rng",
         "loader",
     }
@@ -101,7 +105,7 @@ METADATA_KEYS = frozenset(
     }
 )
 _IDENTITY_FIELDS = ("config_hash", "tokenizer_sha256", "dataset_version")
-_STEP_FILE = re.compile(r"^step-(\d{8})\.pt$")
+_STEP_FILE = re.compile(r"^step-(\d{8})-([0-9a-f]{16})\.pt$")
 _NAMED = frozenset({"best_val", "crash", "final"})
 
 
@@ -154,8 +158,8 @@ def _atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def write_checkpoint(path: Path, state: dict[str, Any]) -> str:
-    """Atomically write ``state`` with a checksummed header; return the payload sha256."""
+def _encode(state: dict[str, Any]) -> tuple[str, bytes]:
+    """Validate and serialize ``state``; return ``(payload sha256, file bytes)``."""
     _validate_structure(state)
     buffer = io.BytesIO()
     torch.save(state, buffer)
@@ -167,7 +171,13 @@ def write_checkpoint(path: Path, state: dict[str, Any]) -> str:
         "payload_sha256": digest,
         "payload_bytes": len(payload),
     }
-    _atomic_write(path, json.dumps(header, sort_keys=True).encode("ascii") + b"\n" + payload)
+    return digest, json.dumps(header, sort_keys=True).encode("ascii") + b"\n" + payload
+
+
+def write_checkpoint(path: Path, state: dict[str, Any]) -> str:
+    """Atomically write ``state`` with a checksummed header; return the payload sha256."""
+    digest, data = _encode(state)
+    _atomic_write(path, data)
     return digest
 
 
@@ -227,12 +237,20 @@ class CheckpointManager:
         """Existing step checkpoints in ascending step order (temporary files excluded)."""
         if not self.directory.is_dir():
             return []
-        return sorted(p for p in self.directory.iterdir() if _STEP_FILE.match(p.name))
+        paths = [p for p in self.directory.iterdir() if _STEP_FILE.match(p.name)]
+        return sorted(paths, key=lambda p: (int(p.name[5:13]), p.stat().st_mtime_ns, p.name))
 
     def save_step(self, state: dict[str, Any], step: int) -> Path:
-        """Write ``step-XXXXXXXX.pt``, then update ``latest.json``, then prune old steps."""
-        path = self.directory / f"step-{step:08d}.pt"
-        digest = write_checkpoint(path, state)
+        """Write ``step-XXXXXXXX-<digest>.pt``, then update ``latest.json``, then prune.
+
+        The file name contains the payload digest, so saving a step again never modifies the
+        file the current pointer names: identical bytes get the same name, a different state
+        gets a new file. The pointer moves only after that file is durable, and pruning never
+        removes the file the pointer names.
+        """
+        digest, data = _encode(state)
+        path = self.directory / f"step-{step:08d}-{digest[:16]}.pt"
+        _atomic_write(path, data)
         pointer = {"file": path.name, "global_step": step, "payload_sha256": digest}
         _atomic_write(self.pointer, json.dumps(pointer, sort_keys=True).encode("ascii") + b"\n")
         for old in self.step_paths()[: -self.keep_last]:

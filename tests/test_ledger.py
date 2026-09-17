@@ -12,6 +12,8 @@ import pytest
 
 from kittylm.ledger import (
     REQUIRED_CI_JOBS,
+    RESUME_CATEGORIES,
+    RESUME_EXACT_REQUIRED,
     RESUME_HARNESS,
     LedgerError,
     load_all_records,
@@ -175,17 +177,29 @@ def test_invalid_records_are_rejected(path: str, value: Any, problem: str) -> No
     assert problem in str(exc.value)
 
 
-def test_resume_evidence_rules() -> None:
-    evidence = {
+def full_comparison(device_type: str = "cpu", **verdicts: str) -> dict[str, str]:
+    comparison = {category: "exact" for category in RESUME_CATEGORIES}
+    comparison.update(verdicts)
+    comparison["device_type"] = device_type
+    return comparison
+
+
+def resume_record(status: str, comparison: dict[str, str]) -> dict[str, Any]:
+    data = mutate("reproducibility.checkpoint_resume_test", status)
+    data["reproducibility"]["resume_evidence"] = {
         "harness": RESUME_HARNESS,
         "run_id": "run-1",
         "kill_step": 5,
         "resumed_to_step": 10,
         "metrics_sha256": SHA,
-        "comparison": {"global_step": "exact"},
+        "comparison": comparison,
     }
-    data = mutate("reproducibility.checkpoint_resume_test", "passed")
-    data["reproducibility"]["resume_evidence"] = evidence
+    return data
+
+
+def test_resume_evidence_rules() -> None:
+    data = resume_record("passed", full_comparison())
+    evidence = data["reproducibility"]["resume_evidence"]
     assert parse_record(data).reproducibility.checkpoint_resume_test == "passed"
 
     forged = copy.deepcopy(data)
@@ -196,6 +210,55 @@ def test_resume_evidence_rules() -> None:
     stale = mutate("reproducibility.resume_evidence", evidence)
     with pytest.raises(LedgerError, match="must be null"):
         parse_record(stale)
+
+
+@pytest.mark.parametrize("missing", RESUME_CATEGORIES)
+def test_resume_comparison_must_be_complete(missing: str) -> None:
+    comparison = full_comparison()
+    del comparison[missing]
+    for status in ("passed", "failed"):
+        with pytest.raises(LedgerError, match=f"missing categories \\['{missing}'\\]"):
+            parse_record(resume_record(status, comparison))
+
+
+@pytest.mark.parametrize("category", RESUME_EXACT_REQUIRED["cpu"])
+def test_passed_requires_every_exact_category_on_cpu(category: str) -> None:
+    comparison = full_comparison(**{category: "max_abs_dev=1.000e-07"})
+    with pytest.raises(LedgerError, match="not exact"):
+        parse_record(resume_record("passed", comparison))
+    # The same divergence is a consistent record when the status says failed.
+    assert parse_record(resume_record("failed", comparison))
+
+
+def test_gpu_passed_allows_measured_tensor_deviations_only() -> None:
+    deviations = {
+        c: "max_abs_dev=2.000e-06"
+        for c in RESUME_CATEGORIES
+        if c not in RESUME_EXACT_REQUIRED["cuda"]
+    }
+    assert set(deviations) == {"optimizer_state", "model_parameters", "loss_series"}
+    assert parse_record(resume_record("passed", full_comparison("cuda", **deviations)))
+    for category in RESUME_EXACT_REQUIRED["cuda"]:
+        broken = full_comparison("cuda", **{category: "values differ"})
+        with pytest.raises(LedgerError, match="not exact"):
+            parse_record(resume_record("passed", broken))
+
+
+@pytest.mark.parametrize(
+    ("comparison", "status", "problem"),
+    [
+        (full_comparison(), "failed", "every required category is exact"),
+        (full_comparison("rocm"), "passed", "device_type must be one of"),
+        ({**full_comparison(), "vibes": "exact"}, "passed", "unknown categories"),
+        ({"global_step": "exact"}, "passed", "device_type must be one of"),
+        ({}, "passed", "device_type must be one of"),
+    ],
+)
+def test_inconsistent_resume_comparisons_are_rejected(
+    comparison: dict[str, str], status: str, problem: str
+) -> None:
+    with pytest.raises(LedgerError, match=problem):
+        parse_record(resume_record(status, comparison))
 
 
 def test_forbidden_identifiers_and_secrets() -> None:

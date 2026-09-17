@@ -11,6 +11,8 @@ Public API:
 
 Invariants:
     - ``min_learning_rate <= learning_rate``; ``warmup_steps <= max_steps``.
+    - Every floating-point hyperparameter (FLOAT_FIELDS) is finite: NaN and +/-Inf are rejected
+      before any range check, because a range comparison with NaN is always False.
     - ``gradient_accumulation`` micro-batches of ``batch_size`` form one optimizer step, so each
       step consumes ``batch_size * gradient_accumulation * context_length`` tokens.
 
@@ -23,12 +25,23 @@ See:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, fields
 from typing import Literal
 
 from kittylm.config import ConfigError, register_config_kind
 
-__all__ = ["TrainingConfig"]
+__all__ = ["FLOAT_FIELDS", "TrainingConfig"]
+
+FLOAT_FIELDS: tuple[str, ...] = (
+    "learning_rate",
+    "min_learning_rate",
+    "weight_decay",
+    "beta1",
+    "beta2",
+    "adam_eps",
+    "grad_clip",
+)
 
 
 @dataclass(frozen=True)
@@ -52,14 +65,20 @@ class TrainingConfig:
         "semi_deterministic"
     )
     log_every: int = 10
-    eval_every: int = 0
+    eval_every: int = 0  # validate every N steps; > 0 requires validation batches (engine)
     checkpoint_every: int = 0
     keep_last: int = 3
     timing_sync_every: int = 10
     cpu_threads: int = 0
 
     def __post_init__(self) -> None:
-        """Validate ranges."""
+        """Validate ranges (every floating-point field must be finite first)."""
+        for name in FLOAT_FIELDS:
+            if not math.isfinite(getattr(self, name)):
+                raise ConfigError(f"{name} must be finite, got {getattr(self, name)!r}")
+        float_fields = {f.name for f in fields(self) if f.type in ("float", float)}
+        if float_fields != set(FLOAT_FIELDS):  # a new float field must be added to FLOAT_FIELDS
+            raise ConfigError(f"FLOAT_FIELDS is out of date: {sorted(float_fields)}")
         for name in ("batch_size", "gradient_accumulation", "max_steps", "keep_last"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be >= 1")

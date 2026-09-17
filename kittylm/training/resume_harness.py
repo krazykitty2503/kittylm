@@ -8,10 +8,12 @@ Purpose:
     - run B1 trains to ``kill_step``, writes a step checkpoint and exits (the "kill");
     - run B2 is a new process that resumes from that checkpoint and trains to ``total_steps``.
 
-    The harness then compares A with B1+B2 category by category: global step, scheduler state and
-    learning-rate series, every optimizer state tensor, every model parameter, every RNG state
-    (Python, NumPy, PyTorch CPU, CUDA), the loader generator and draw count, the per-step loss
-    series, the per-step batch window starts, and the window starts of the *next* batch. On CPU
+    The harness then compares A with B1+B2 in every category of ``kittylm.ledger.
+    RESUME_CATEGORIES``: global step, tokens seen, skipped fp16 updates, scheduler state and
+    learning-rate series, every optimizer state tensor, the fp16 loss-scaler state, every model
+    parameter, the best validation loss, every RNG state (Python, NumPy, PyTorch CPU, CUDA), the
+    loader generator and draw count, the per-step loss series, the per-step batch window starts,
+    and the window starts of the *next* batch. On CPU
     every category must be bit-identical. On GPUs the counters, schedule, RNG states and data order
     must be identical, while tensor and loss deviations are measured and reported (GPU kernels may
     be nondeterministic). Only this module constructs ``ResumeEvidence`` (D-012).
@@ -43,6 +45,9 @@ Failure modes:
     - A worker that exits non-zero raises HarnessError (the harness never reports a pass it did
       not observe).
     - A resume that does not land exactly on ``kill_step`` raises HarnessError.
+    - ``total_steps`` beyond the training ``max_steps`` raises HarnessError before any worker
+      runs, and a worker (or its checkpoint) that reports a step other than the one it was asked
+      to reach raises HarnessError, so evidence never claims steps that did not run.
 
 See:
     D-012, plan rev 3.3 section 4, kittylm/ledger.py (ResumeEvidence validation).
@@ -63,7 +68,12 @@ import torch
 
 from kittylm.config import canonical_json, config_hash, from_dict
 from kittylm.data.loader import TrainWindowSampler, open_token_file
-from kittylm.ledger import RESUME_HARNESS, ResumeEvidence
+from kittylm.ledger import (
+    RESUME_CATEGORIES,
+    RESUME_EXACT_REQUIRED,
+    RESUME_HARNESS,
+    ResumeEvidence,
+)
 from kittylm.model.config import ModelConfig
 from kittylm.model.transformer import KittyLM
 from kittylm.training.checkpoint import RunIdentity, read_checkpoint
@@ -72,6 +82,7 @@ from kittylm.training.determinism import seed_everything
 from kittylm.training.engine import RunInfo, TrainingEngine
 
 __all__ = [
+    "ALL_CATEGORIES",
     "CPU_EXACT_CATEGORIES",
     "GPU_EXACT_CATEGORIES",
     "HarnessError",
@@ -82,33 +93,10 @@ __all__ = [
 ]
 
 HARNESS_TOKENIZER_SHA256 = hashlib.sha256(b"kittylm resume harness: pre-tokenized data").hexdigest()
-CPU_EXACT_CATEGORIES: tuple[str, ...] = (
-    "global_step",
-    "scheduler",
-    "learning_rates",
-    "optimizer_state",
-    "model_parameters",
-    "rng_python",
-    "rng_numpy",
-    "rng_torch",
-    "rng_cuda",
-    "loader_state",
-    "loss_series",
-    "batch_indices",
-    "next_batch_indices",
-)
-GPU_EXACT_CATEGORIES: tuple[str, ...] = (
-    "global_step",
-    "scheduler",
-    "learning_rates",
-    "rng_python",
-    "rng_numpy",
-    "rng_torch",
-    "rng_cuda",
-    "loader_state",
-    "batch_indices",
-    "next_batch_indices",
-)
+# The category lists live in the ledger so the record validator enforces the same set (D-012).
+ALL_CATEGORIES: tuple[str, ...] = RESUME_CATEGORIES
+CPU_EXACT_CATEGORIES: tuple[str, ...] = RESUME_EXACT_REQUIRED["cpu"]
+GPU_EXACT_CATEGORIES: tuple[str, ...] = RESUME_EXACT_REQUIRED["cuda"]
 
 
 class HarnessError(RuntimeError):
@@ -219,6 +207,10 @@ def compare_runs(
         == (resumed_state["global_step"])
     )
     categories["global_step"] = "exact" if steps_ok else "values differ"
+    for counter in ("tokens_seen", "skipped_steps"):
+        categories[counter] = (
+            "exact" if full_state[counter] == resumed_state[counter] else "values differ"
+        )
     categories["scheduler"] = _compare_values(full_state["scheduler"], resumed_state["scheduler"])
     categories["learning_rates"] = _compare_series(
         full["learning_rates"], first["learning_rates"] + resume["learning_rates"]
@@ -226,7 +218,12 @@ def compare_runs(
     categories["optimizer_state"] = _compare_values(
         full_state["optimizer"], resumed_state["optimizer"]
     )
+    # fp16 loss-scaler state (scale, growth tracker); None on both sides for bf16/fp32.
+    categories["grad_scaler"] = _compare_values(full_state["scaler"], resumed_state["scaler"])
     categories["model_parameters"] = _compare_values(full_state["model"], resumed_state["model"])
+    categories["best_val_loss"] = _compare_values(
+        full_state["best_val_loss"], resumed_state["best_val_loss"]
+    )
     for source in ("python", "numpy", "torch", "cuda"):
         categories[f"rng_{source}"] = _compare_values(
             full_state["rng"][source], resumed_state["rng"][source]
@@ -242,6 +239,9 @@ def compare_runs(
         "exact" if full["next_batch_starts"] == resume["next_batch_starts"] else "values differ"
     )
     categories["device_type"] = device_type
+    missing = [c for c in RESUME_CATEGORIES if c not in categories]
+    if missing:  # guards the ledger contract: every category is always reported
+        raise HarnessError(f"comparison did not produce categories {missing}")
     return categories
 
 
@@ -343,12 +343,25 @@ def _run_mode(
     return data
 
 
+def _check_reached(reported: dict[str, Any], expected: int) -> None:
+    """Every worker must report exactly the step it was asked to reach."""
+    wrong = {name: step for name, step in reported.items() if step != expected}
+    if wrong:
+        raise HarnessError(f"expected step {expected}, but workers reported {wrong}")
+
+
 def validate_resume(
     spec: HarnessSpec, work_dir: Path, python: str = sys.executable
 ) -> ResumeReport:
     """Run A, B1 and B2 in fresh processes and compare them (see module docstring)."""
     if not 0 < spec.kill_step < spec.total_steps:
         raise HarnessError("require 0 < kill_step < total_steps")
+    max_steps = from_dict(TrainingConfig, spec.training).max_steps
+    if spec.total_steps > max_steps:
+        raise HarnessError(
+            f"total_steps {spec.total_steps} exceeds training max_steps {max_steps}; "
+            "the harness never certifies steps it cannot run"
+        )
     work_dir.mkdir(parents=True, exist_ok=True)
     spec_path = work_dir / "spec.json"
     spec_path.write_text(json.dumps(asdict(spec), sort_keys=True), encoding="utf-8")
@@ -360,6 +373,15 @@ def validate_resume(
 
     full_state = read_checkpoint(full_dir / "checkpoints" / "final.pt")
     resumed_state = read_checkpoint(split_dir / "checkpoints" / "final.pt")
+    _check_reached(
+        {"full": full["global_step"], "full checkpoint": full_state["global_step"]},
+        spec.total_steps,
+    )
+    _check_reached({"first": first["global_step"]}, spec.kill_step)
+    _check_reached(
+        {"resume": resume["global_step"], "resume checkpoint": resumed_state["global_step"]},
+        spec.total_steps,
+    )
     device_type = torch.device(spec.device).type
     categories = compare_runs(full, first, resume, full_state, resumed_state, device_type)
     exact_required = GPU_EXACT_CATEGORIES if device_type == "cuda" else CPU_EXACT_CATEGORIES

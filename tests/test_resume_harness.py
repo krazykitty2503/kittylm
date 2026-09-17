@@ -12,12 +12,15 @@ import pytest
 import torch
 
 from kittylm.config import from_dict, load_yaml, to_dict
-from kittylm.ledger import RESUME_HARNESS, parse_record
+from kittylm.ledger import RESUME_CATEGORIES, RESUME_HARNESS, LedgerError, parse_record
 from kittylm.model.config import ModelConfig
 from kittylm.training.resume_harness import (
+    ALL_CATEGORIES,
     CPU_EXACT_CATEGORIES,
+    GPU_EXACT_CATEGORIES,
     HarnessError,
     HarnessSpec,
+    _check_reached,
     compare_runs,
     validate_resume,
 )
@@ -77,7 +80,7 @@ def test_evidence_is_complete_and_accepted_by_the_ledger(cpu_report: Any) -> Non
     assert ev.harness == RESUME_HARNESS == "kittylm.training.resume_harness"
     assert (ev.kill_step, ev.resumed_to_step) == (spec.kill_step, spec.total_steps)
     assert len(ev.metrics_sha256) == 64
-    assert set(CPU_EXACT_CATEGORIES) <= set(ev.comparison)
+    assert set(ev.comparison) == set(RESUME_CATEGORIES) | {"device_type"}
     data = mutate("reproducibility.checkpoint_resume_test", "passed")
     data["reproducibility"]["resume_evidence"] = to_dict(ev)
     record = parse_record(data)
@@ -88,6 +91,21 @@ def test_harness_rejects_invalid_split(tmp_path: Path) -> None:
     spec = replace(nano_spec(tmp_path), kill_step=8)
     with pytest.raises(HarnessError, match="kill_step"):
         validate_resume(spec, tmp_path / "work")
+
+
+def test_harness_refuses_total_steps_beyond_max_steps(tmp_path: Path) -> None:
+    # Regression: workers silently clamped training to max_steps, so a spec asking for more
+    # steps could pass with evidence claiming resumed_to_step it never reached.
+    spec = replace(nano_spec(tmp_path), total_steps=9)  # training max_steps is 8
+    with pytest.raises(HarnessError, match="exceeds training max_steps 8"):
+        validate_resume(spec, tmp_path / "work")
+    assert not (tmp_path / "work").exists()  # refused before any worker ran
+
+
+def test_workers_must_report_the_requested_step() -> None:
+    _check_reached({"full": 8, "full checkpoint": 8}, 8)
+    with pytest.raises(HarnessError, match="expected step 8.*'resume': 6"):
+        _check_reached({"resume": 6, "resume checkpoint": 8}, 8)
 
 
 def test_harness_reports_worker_failures(tmp_path: Path) -> None:
@@ -128,6 +146,10 @@ def fake_runs() -> tuple[
     }
     state = {
         "global_step": 4,
+        "tokens_seen": 64,
+        "skipped_steps": 1,
+        "best_val_loss": 2.5,
+        "scaler": {"scale": 32768.0, "growth_factor": 2.0, "_growth_tracker": 3},
         "scheduler": {"step": 4, "last_lr": 0.4},
         "optimizer": {
             "state": {0: {"exp_avg": torch.ones(3), "step": torch.tensor(4.0)}},
@@ -148,12 +170,26 @@ def fake_runs() -> tuple[
 def test_identical_fake_runs_compare_exact() -> None:
     categories = compare_runs(*fake_runs(), device_type="cpu")
     assert all(categories[name] == "exact" for name in CPU_EXACT_CATEGORIES)
+    assert set(categories) == set(RESUME_CATEGORIES) | {"device_type"}
+
+
+def test_category_sets_are_shared_with_the_ledger() -> None:
+    assert ALL_CATEGORIES == RESUME_CATEGORIES == CPU_EXACT_CATEGORIES
+    assert {"tokens_seen", "skipped_steps", "grad_scaler", "best_val_loss"} <= set(
+        GPU_EXACT_CATEGORIES
+    )
 
 
 @pytest.mark.parametrize(
     ("category", "tamper"),
     [
         ("global_step", lambda f, a, r, s, t: t.update(global_step=5)),
+        ("tokens_seen", lambda f, a, r, s, t: t.update(tokens_seen=48)),
+        ("skipped_steps", lambda f, a, r, s, t: t.update(skipped_steps=0)),
+        ("grad_scaler", lambda f, a, r, s, t: t["scaler"].update(scale=16384.0)),
+        ("grad_scaler", lambda f, a, r, s, t: t["scaler"].update(_growth_tracker=0)),
+        ("grad_scaler", lambda f, a, r, s, t: t.update(scaler=None)),
+        ("best_val_loss", lambda f, a, r, s, t: t.update(best_val_loss=float("inf"))),
         ("scheduler", lambda f, a, r, s, t: t["scheduler"].update(last_lr=0.5)),
         ("learning_rates", lambda f, a, r, s, t: r["learning_rates"].__setitem__(0, (9.0).hex())),
         ("optimizer_state", lambda f, a, r, s, t: t["optimizer"]["state"][0]["exp_avg"].add_(1e-7)),
@@ -179,6 +215,23 @@ def test_each_divergence_is_detected(category: str, tamper: Any) -> None:
     tamper(full, first, resume, state, resumed_state)
     categories = compare_runs(full, first, resume, state, resumed_state, device_type="cpu")
     assert categories[category] != "exact", categories
+    # Every divergence in a GPU-exact category also fails a GPU comparison.
+    if category in GPU_EXACT_CATEGORIES:
+        gpu = compare_runs(full, first, resume, state, resumed_state, device_type="cuda")
+        assert gpu[category] != "exact"
+
+
+def test_ledger_rejects_passed_evidence_with_a_doctored_comparison(cpu_report: Any) -> None:
+    _, report = cpu_report
+    for category in ("tokens_seen", "grad_scaler"):
+        comparison = {**report.evidence.comparison, category: "values differ"}
+        data = mutate("reproducibility.checkpoint_resume_test", "passed")
+        data["reproducibility"]["resume_evidence"] = {
+            **to_dict(report.evidence),
+            "comparison": comparison,
+        }
+        with pytest.raises(LedgerError, match="not exact"):
+            parse_record(data)
 
 
 # --- only the harness may produce resume evidence -------------------------------------------------

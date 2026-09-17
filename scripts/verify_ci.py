@@ -19,7 +19,7 @@ import argparse
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,30 @@ def gh_json(*args: str) -> Any:
     if result.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:2])} failed: {result.stderr.strip()[:300]}")
     return json.loads(result.stdout)
+
+
+PER_PAGE = 100
+MAX_PAGES = 50  # 5,000 items: far beyond any single commit's runs or a run's jobs
+
+
+def fetch_all(
+    fetch: Callable[[str], Any], path: str, key: str, per_page: int = PER_PAGE
+) -> list[dict[str, Any]]:
+    """Every item of a paginated GitHub list endpoint (``fetch(url) -> page JSON``).
+
+    Reads pages until one is short or the reported ``total_count`` is reached, so a matching run
+    or a required job beyond the first page is never treated as absent.
+    """
+    separator = "&" if "?" in path else "?"
+    items: list[dict[str, Any]] = []
+    for page in range(1, MAX_PAGES + 1):
+        data = fetch(f"{path}{separator}per_page={per_page}&page={page}")
+        batch = data.get(key, [])
+        items.extend(batch)
+        total = data.get("total_count")
+        if len(batch) < per_page or (isinstance(total, int) and len(items) >= total):
+            return items
+    raise RuntimeError(f"{path}: more than {MAX_PAGES} pages; refusing to guess")
 
 
 def select_run(runs: Sequence[dict[str, Any]], commit: str) -> dict[str, Any] | None:
@@ -67,13 +91,19 @@ def main(argv: list[str] | None = None) -> int:
         ).stdout.strip()
     )
     repo = args.repo or gh_json("repo", "view", "--json", "nameWithOwner")["nameWithOwner"]
-    runs = gh_json("api", f"repos/{repo}/actions/runs?head_sha={commit}&per_page=100")
-    run = select_run(runs.get("workflow_runs", []), commit)
+
+    def fetch(url: str) -> Any:
+        return gh_json("api", url)
+
+    runs = fetch_all(fetch, f"repos/{repo}/actions/runs?head_sha={commit}", "workflow_runs")
+    run = select_run(runs, commit)
     if run is None:
         print(f"no completed '{REQUIRED_CI_WORKFLOW}' push run found for {commit}")
         return 1
-    jobs = gh_json("api", f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
-    evidence = ci_evidence_from_github(run, jobs.get("jobs", []))
+    # filter=latest: only the selected attempt's jobs, so an older failed attempt cannot mask
+    # (or be masked by) the attempt the evidence names.
+    jobs = fetch_all(fetch, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+    evidence = ci_evidence_from_github(run, jobs)
     problems = ci_evidence_problems(evidence, commit)
 
     out = args.out or ROOT / "runs" / "ci_evidence" / f"{commit}.json"

@@ -152,7 +152,12 @@ class TrainWindowSampler:
 def validation_batches(
     tokens: np.ndarray, *, context_length: int, batch_size: int, max_batches: int | None = None
 ) -> list[Batch]:
-    """Fixed, non-overlapping validation windows (the last partial window is dropped)."""
+    """Fixed, non-overlapping validation windows.
+
+    The trailing tokens that do not fill a whole window are dropped. The last *batch* may hold
+    fewer than ``batch_size`` windows; consumers must weight losses by token count (the engine's
+    ``validate`` does) so those windows are not over-weighted.
+    """
     if len(tokens) < context_length + 1:
         raise ValueError("validation stream is shorter than context_length + 1")
     starts = list(range(0, len(tokens) - context_length, context_length))

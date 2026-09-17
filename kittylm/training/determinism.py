@@ -26,6 +26,9 @@ Invariants:
       subsequent values.
     - ``deterministic`` mode enables ``torch.use_deterministic_algorithms`` (errors instead of
       silently nondeterministic kernels) and disables cuDNN benchmarking.
+    - ``configure_determinism`` sets all three global flags (deterministic algorithms, cuDNN
+      deterministic, cuDNN benchmark) in every mode, so mode transitions within one process
+      never inherit a flag from the previous mode.
 
 Failure modes:
     - In ``deterministic`` mode an operation without a deterministic implementation raises at
@@ -63,20 +66,21 @@ def seed_everything(seed: int) -> None:
 
 def configure_determinism(mode: DeterminismMode) -> None:
     """Configure PyTorch determinism for ``mode``."""
-    if mode == "deterministic":
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-        torch.use_deterministic_algorithms(True)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    elif mode == "semi_deterministic":
-        torch.use_deterministic_algorithms(False)
-        torch.backends.cudnn.deterministic = False
-        torch.backends.cudnn.benchmark = False
-    elif mode == "nondeterministic":
-        torch.use_deterministic_algorithms(False)
-        torch.backends.cudnn.benchmark = True
-    else:
+    # Every mode sets every process-global flag, so the result never depends on which mode an
+    # earlier engine in the same process configured.
+    flags = {
+        "deterministic": (True, True, False),
+        "semi_deterministic": (False, False, False),
+        "nondeterministic": (False, False, True),
+    }
+    if mode not in flags:
         raise ValueError(f"unknown determinism mode {mode!r}")
+    algorithms, cudnn_deterministic, cudnn_benchmark = flags[mode]
+    if algorithms:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(algorithms)
+    torch.backends.cudnn.deterministic = cudnn_deterministic
+    torch.backends.cudnn.benchmark = cudnn_benchmark
 
 
 def capture_rng_state(include_cuda: bool) -> dict[str, Any]:

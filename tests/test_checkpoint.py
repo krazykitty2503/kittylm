@@ -16,6 +16,7 @@ import torch
 
 from kittylm.training.checkpoint import (
     CHECKPOINT_KEYS,
+    FORMAT_VERSION,
     METADATA_KEYS,
     CheckpointError,
     CheckpointManager,
@@ -49,6 +50,8 @@ def state(step: int = 1, **metadata_changes: Any) -> dict[str, Any]:
         "scaler": None,
         "global_step": step,
         "tokens_seen": step * 10,
+        "skipped_steps": 0,
+        "best_val_loss": float("inf"),
         "rng": {"torch": torch.get_rng_state()},
         "loader": {"generator": torch.Generator().get_state(), "batches_drawn": step},
     }
@@ -80,7 +83,7 @@ def test_whitelists_are_enforced_on_write(tmp_path: Path) -> None:
         (lambda b: b[:-10], "truncated"),
         (lambda b: b[:-1] + bytes([b[-1] ^ 0xFF]), "checksum mismatch"),
         (lambda b: b.replace(b"kittylm-checkpoint", b"other-checkpoint!!"), "not a KittyLM"),
-        (lambda b: b.replace(b'"format_version": 1', b'"format_version": 9'), "format version"),
+        (lambda b: b.replace(b'"format_version": 2', b'"format_version": 9'), "format version"),
         (lambda b: b"garbage without header", "missing checkpoint header"),
         (lambda b: b"{not json\n" + b, "unreadable checkpoint header"),
     ],
@@ -105,7 +108,7 @@ def test_arbitrary_objects_are_refused_even_with_a_valid_checksum(tmp_path: Path
     payload = buffer.getvalue()
     header = {
         "magic": "kittylm-checkpoint",
-        "format_version": 1,
+        "format_version": FORMAT_VERSION,
         "payload_sha256": hashlib.sha256(payload).hexdigest(),
         "payload_bytes": len(payload),
     }
@@ -120,8 +123,9 @@ def test_manager_pointer_pruning_and_named(tmp_path: Path) -> None:
     assert manager.latest_path() is None and manager.load_latest(IDENTITY) is None
     for step in (1, 2, 3, 4):
         manager.save_step(state(step), step)
-    assert [p.name for p in manager.step_paths()] == ["step-00000003.pt", "step-00000004.pt"]
-    assert manager.latest_path() == tmp_path / "ck" / "step-00000004.pt"
+    assert [p.name[:13] for p in manager.step_paths()] == ["step-00000003", "step-00000004"]
+    latest = manager.latest_path()
+    assert latest is not None and latest.name.startswith("step-00000004-")
     loaded = manager.load_latest(IDENTITY)
     assert loaded is not None and loaded["global_step"] == 4
     assert manager.save_named(state(9), "crash").name == "crash.pt"
@@ -148,7 +152,7 @@ def test_pointer_problems_are_detected(tmp_path: Path) -> None:
     with pytest.raises(CheckpointError, match="checksum does not match"):
         manager.latest_path()
     manager.pointer.write_text(
-        json.dumps({**pointer, "file": "step-00000099.pt"}), encoding="ascii"
+        json.dumps({**pointer, "file": "step-00000099-0123456789abcdef.pt"}), encoding="ascii"
     )
     with pytest.raises(CheckpointError, match="missing checkpoint"):
         manager.latest_path()
@@ -170,9 +174,47 @@ def test_interrupted_save_keeps_previous_latest(
     with pytest.raises(OSError, match="simulated crash"):
         manager.save_step(state(2), 2)
     monkeypatch.undo()
-    assert [p.name for p in (tmp_path / "ck").iterdir()] == ["latest.json", "step-00000001.pt"]
+    names = sorted(p.name for p in (tmp_path / "ck").iterdir())
+    assert len(names) == 2 and names[0] == "latest.json" and names[1].startswith("step-00000001-")
     loaded = manager.load_latest(IDENTITY)
     assert loaded is not None and loaded["global_step"] == 1
+
+
+def test_resaving_a_step_cannot_invalidate_the_current_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: step files used to be named only by step, so a second save of the same step
+    # overwrote the file latest.json named before the pointer moved; a crash in between left a
+    # pointer whose checksum no longer matched, and the only latest checkpoint was refused.
+    manager = CheckpointManager(tmp_path / "ck", keep_last=3)
+    first = state(5)
+    manager.save_step(first, 5)
+    pointed = manager.latest_path()
+    assert pointed is not None
+    original_bytes = pointed.read_bytes()
+
+    changed = state(5)
+    changed["model"]["w"] = torch.full((3,), -1.0)  # same step, different content
+    real_replace = os.replace
+
+    def pointer_write_fails(src: str, dst: str) -> None:
+        if Path(dst).name == "latest.json":
+            raise OSError("simulated crash while replacing latest.json")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", pointer_write_fails)
+    with pytest.raises(OSError, match="latest.json"):
+        manager.save_step(changed, 5)
+    monkeypatch.undo()
+
+    assert pointed.read_bytes() == original_bytes  # the pointed-at file was never touched
+    loaded = manager.load_latest(IDENTITY)
+    assert loaded is not None and torch.equal(loaded["model"]["w"], first["model"]["w"])
+
+    # A completed re-save points at the new content; identical content maps to the same file.
+    new_path = manager.save_step(changed, 5)
+    assert new_path != pointed and manager.latest_path() == new_path
+    assert manager.save_step(changed, 5) == new_path
 
 
 HARD_KILL = """
@@ -201,10 +243,11 @@ def test_hard_kill_during_save_leaves_a_loadable_previous_checkpoint(tmp_path: P
     )
     assert result.returncode == 9, result.stderr[-1000:]
     names = sorted(p.name for p in directory.iterdir())
-    assert "step-00000002.pt" not in names  # the partial file was never renamed into place
-    assert any(n.startswith(".step-00000002.pt.") and n.endswith(".tmp") for n in names)
+    # the partial file was never renamed into place
+    assert not any(n.startswith("step-00000002-") for n in names)
+    assert any(n.startswith(".step-00000002-") and n.endswith(".tmp") for n in names)
     manager = CheckpointManager(directory, keep_last=5)
-    assert [p.name for p in manager.step_paths()] == ["step-00000001.pt"]
+    assert [p.name[:13] for p in manager.step_paths()] == ["step-00000001"]
     loaded = manager.load_latest(IDENTITY)
     assert loaded is not None and loaded["global_step"] == 1
 

@@ -135,7 +135,15 @@ Export, KittyOS integration and the feedback loop are architectural boundaries o
   (linear warmup, then cosine decay to a floor) → for each micro-batch run forward under the
   precision policy, divide the loss by the accumulation count and backpropagate → clip the global
   gradient norm to 1.0 → AdamW step (weight decay only on matrices, not gains) → advance counters.
-  A non-finite loss or gradient norm saves a `crash` checkpoint and stops before the bad update.
+  A non-finite loss or gradient norm saves a `crash` checkpoint and stops before the bad update;
+  that checkpoint holds the loader and RNG state from *before* the step, so a retry replays it.
+- **fp16 loss scaling**: fp16 gradients can overflow. The loss scaler detects inf/NaN gradients,
+  skips that optimizer update and lowers the scale. A skipped attempt does not count as a step:
+  the schedule, `global_step` and `tokens_seen` stay put, the skip is counted and logged, and the
+  next attempt uses the next batches. Thirty skips in a row stop the run.
+- **Validation**: fixed, non-overlapping windows; the loss is averaged per *token*, so a smaller
+  final batch is not over-weighted. With `eval_every > 0` the engine validates on schedule, and
+  `best_val.pt` is replaced only when the loss beats the checkpointed best.
 - **Precision**: bf16 autocast keeps fp32 master weights and runs matmuls in bf16; fp16 would
   additionally need a gradient scaler; the loss is always computed in fp32.
 - **Asynchronous GPU timing**: GPU kernels are queued and return immediately, so a wall-clock

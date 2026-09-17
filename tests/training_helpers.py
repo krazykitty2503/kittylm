@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from kittylm.config import config_hash, to_dict
-from kittylm.data.loader import TOKEN_DTYPE, TrainWindowSampler, open_token_file
+from kittylm.data.loader import TOKEN_DTYPE, Batch, TrainWindowSampler, open_token_file
 from kittylm.model.config import ModelConfig
 from kittylm.model.transformer import KittyLM
 from kittylm.training.checkpoint import RunIdentity
@@ -70,6 +70,7 @@ def make_engine(
     token_file: Path | None = None,
     run_name: str = "run",
     run: RunInfo | None = None,
+    validation_batches: list[Batch] | None = None,
     **training_changes: Any,
 ) -> TrainingEngine:
     if training_changes:
@@ -95,6 +96,7 @@ def make_engine(
         device=torch.device("cpu"),
         run_dir=tmp_path / run_name,
         identity=identity_for(model_config, training, token_file),
+        validation_batches=validation_batches,
         run=run
         or RunInfo(kind="engineering", experiment_id=run_name, git_commit=COMMIT, git_dirty=False),
     )
