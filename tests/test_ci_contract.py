@@ -26,8 +26,29 @@ def run_commands(workflow: dict[Any, Any]) -> list[str]:
     ]
 
 
+REQUIRED_JOBS = {"quality": "quality", "tests": "tests", "security": "security"}
+
+
 def test_expected_workflows_exist() -> None:
-    assert [p.name for p in WORKFLOWS] == ["quality.yml", "security.yml", "tests.yml"]
+    # One workflow with one job per required check group (no duplicate runs).
+    assert [p.name for p in WORKFLOWS] == ["tests.yml"]
+
+
+def test_every_required_group_has_its_own_job() -> None:
+    jobs = load_workflow(ROOT / ".github" / "workflows" / "tests.yml")["jobs"]
+    assert set(jobs) == set(REQUIRED_JOBS)
+    for job_id, group in REQUIRED_JOBS.items():
+        commands = "\n".join(step["run"] for step in jobs[job_id]["steps"] if "run" in step)
+        assert re.search(rf"scripts/check\.py\s+{group}\b", commands), job_id
+
+
+def test_ci_installs_cpu_only_torch_before_the_project() -> None:
+    jobs = load_workflow(ROOT / ".github" / "workflows" / "tests.yml")["jobs"]
+    for job_id, job in jobs.items():
+        runs = [step["run"] for step in job["steps"] if "run" in step]
+        cpu = next(i for i, r in enumerate(runs) if "download.pytorch.org/whl/cpu" in r)
+        project = next(i for i, r in enumerate(runs) if 'install -e ".[dev]"' in r)
+        assert cpu < project, job_id
 
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)

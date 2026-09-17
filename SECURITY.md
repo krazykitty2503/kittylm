@@ -35,7 +35,7 @@ Order matters. The secret must be treated as compromised the moment it is found.
 
 * Secret scanner (`kittylm/data/secrets.py`) shared by the data pipeline and repository checks. Findings report file, line, and rule only, never the matched value.
 * Pre-commit hook (`.githooks/pre-commit`) scans staged files and blocks forbidden artifacts.
-* CI (`security.yml`) re-runs the secret scan, artifact guard, provenance check, and `pip-audit` on every push.
+* CI (the Security job in `.github/workflows/tests.yml`) re-runs the secret scan, artifact guard, provenance check, and `pip-audit` on every push.
 * Workflows run with `contents: read` permissions and only official `actions/*` actions.
 * No self-hosted CI runner: it would execute workflow code on a personal machine.
 

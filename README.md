@@ -110,4 +110,4 @@ Copyright 2026 KrazyKitty.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - [docs/architecture.md](docs/architecture.md) · [docs/decisions.md](docs/decisions.md) ·
   [docs/safety.md](docs/safety.md) · [docs/scaling.md](docs/scaling.md) ·
-  [docs/backlog.md](docs/backlog.md) · [docs/pre-publication.md](docs/pre-publication.md)
+  [docs/backlog.md](docs/backlog.md) · [docs/public-release.md](docs/public-release.md)

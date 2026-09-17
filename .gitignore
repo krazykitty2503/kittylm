@@ -1,6 +1,6 @@
 # --- Python / tooling ---------------------------------------------------------
 
-**pycache**/
+__pycache__/
 *.py[cod]
 *.egg-info/
 build/

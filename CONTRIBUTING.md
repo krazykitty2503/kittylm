@@ -52,4 +52,38 @@ and `git config core.hooksPath .githooks`.
 * One logical change per commit; messages explain *why*.
 * Pull requests use the template checklist: tests, local GPU tests (y/n/NA), records for any
   result, regenerated ablation table, provenance for new data, no forbidden artifacts.
-* Never commit secrets, `.env` f
+* Never commit secrets, `.env` files, credentials, raw/cleaned/tokenized data, checkpoints,
+  weights, generated samples, logs or run directories. The pre-commit hook and CI enforce this.
+
+## Experiment requirements
+
+* Every meaningful experiment has an ID (`EXP-###`, variants `EXP-###-suffix`).
+* Every run writes a validated record with: git commit (+dirty flag), environment, dataset and
+  tokenizer versions, model shape, **full parameter accounting**, training setup, measured
+  results, reproducibility status, limitations and notes.
+* Values that were not measured are `null`; resume status is `not_run` unless the resume
+  harness actually ran. Nothing is estimated into a record.
+* Every architectural addition needs an ablation against a named control record (normally
+  EXP-001), with the parameter budget reported so a variant cannot win by size alone.
+
+## Dataset provenance requirements
+
+* Every source declares a license; the recipe's `allowed_licenses` gates ingestion.
+* Documents pass license validation and the secret scan before anything is written to disk.
+* Manifests record hashes and relative paths only; `DATA_SOURCES.md` is generated from them.
+* Feedback or user data is never trained on automatically; it must go through human review
+  into a new, versioned dataset (see `kittylm/integration/README.md`).
+
+## Benchmark reproducibility
+
+A result is reproducible when its record pins the commit, dataset version, tokenizer version,
+resolved config and hardware, and the committed ablation table is regenerated from it.
+
+## Proposing an architecture change
+
+1. Open an *Experiment proposal* issue: hypothesis, the single component under test, control
+   record, what is held constant, metrics, expected parameter budget, scope classification.
+2. Revise the plan if the change is outside the current execution order.
+3. Implement behind the existing mixer seams, with tests and documentation.
+4. Run the ablation, write records, regenerate the table, and report what was measured and
+   what remains uncertain.
