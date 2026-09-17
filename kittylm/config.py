@@ -20,6 +20,8 @@ Public API:
         Deterministic serialization and its sha256, used to identify resolved configs.
     register_config_kind(kind, cls), validate_config_tree(root)
         Every YAML file under ``configs/`` declares ``kind:``; CI validates each one.
+    CONFIG_KIND_MODULES, load_config_kinds()
+        Modules that register kinds; imported lazily so ``config`` has no import cycles.
 
 Invariants:
     - ``from_dict(cls, to_dict(x)) == x`` for supported dataclasses.
@@ -39,6 +41,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import importlib
 import json
 import types
 from collections.abc import Mapping, Sequence
@@ -49,6 +52,8 @@ import yaml
 
 __all__ = [
     "CONFIG_KINDS",
+    "CONFIG_KIND_MODULES",
+    "load_config_kinds",
     "ConfigError",
     "apply_overrides",
     "canonical_json",
@@ -284,6 +289,15 @@ def config_hash(obj: Any) -> str:
 
 CONFIG_KINDS: dict[str, type] = {}
 
+# Modules whose import registers config kinds. Imported lazily by validate_config_tree.
+CONFIG_KIND_MODULES: tuple[str, ...] = ("kittylm.tokenizer.trainer",)
+
+
+def load_config_kinds() -> None:
+    """Import every module in CONFIG_KIND_MODULES so its config kinds are registered."""
+    for module in CONFIG_KIND_MODULES:
+        importlib.import_module(module)
+
 
 def register_config_kind(kind: str, cls: type) -> None:
     """Register the dataclass that validates YAML files declaring ``kind: <kind>``."""
@@ -299,6 +313,7 @@ def validate_config_tree(root: Path) -> tuple[int, list[str]]:
         (number of files checked, list of error messages). A missing ``root`` is not an
         error: it simply contains zero configs.
     """
+    load_config_kinds()
     if not root.is_dir():
         return 0, []
     files = sorted(p for p in root.rglob("*") if p.suffix in {".yaml", ".yml"})

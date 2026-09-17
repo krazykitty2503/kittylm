@@ -1,0 +1,41 @@
+KittyLM smoke corpus. Hand-written for engineering smoke tests only (Apache-2.0).
+
+KittyLM is a small language model built to be understood. A tokenizer turns text into
+tokens, a model predicts the next token, and a training loop makes the prediction better.
+The smoke test checks that every part of the model runs on the GPU and that the model can
+memorize this short text. It is not an experiment and says nothing about model quality.
+
+def fibonacci(n: int) -> list[int]:
+    """Return the first n Fibonacci numbers."""
+    values = [0, 1]
+    while len(values) < n:
+        values.append(values[-1] + values[-2])
+    return values[:n]
+
+
+def is_prime(n: int) -> bool:
+    """Return True if n is a prime number."""
+    if n < 2:
+        return False
+    for divisor in range(2, int(n**0.5) + 1):
+        if n % divisor == 0:
+            return False
+    return True
+
+
+def count_tokens(text: str) -> int:
+    """Return the number of whitespace-separated tokens in the text."""
+    return len(text.split())
+
+model:
+  name: nano
+  layers: 4
+  heads: 4
+  context_length: 256
+  precision: bf16
+
+{"experiment": "SMOKE-GPU-001", "kind": "smoke", "model": "nano", "steps": 200}
+
+$ python scripts/check.py all
+$ python -m pytest -m "not gpu"
+$ git status --short

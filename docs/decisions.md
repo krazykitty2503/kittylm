@@ -96,3 +96,60 @@ produced by `kittylm.training.resume_harness` (kill step, resumed step, metrics 
 **Why.** Formatter and linter output must not drift between local runs and CI; the local ROCm
 PyTorch build must satisfy runtime requirements without being replaced. Dependabot proposes
 upgrades.
+
+### D-014 — Attention kernel selection (reserved)
+
+Reserved for the ROCm attention path chosen from BENCH-ATTN-001 in Milestone B. Not decided yet.
+
+### D-015 — Model-first milestone order
+
+**Decision.** Remaining work runs A tokenizer → B model + BENCH-ATTN-001 → C training engine →
+D evaluation/generation → E SMOKE-GPU-001 → F data pipeline + `local-v1` → G formal experiments.
+**Why.** The highest technical risk is training correctly on an AMD GPU under ROCm on Windows
+(kernels, bf16, throughput, checkpoint/resume), not the data pipeline. Proving the model stack on
+fixtures first surfaces that risk early. Nothing is skipped; only the order changed (plan rev 3.2).
+
+### D-016 — Synthetic generators deferred to `local-v2`
+
+**Decision.** `local-v1` contains no synthetic data; the seeded generators move to `local-v2`,
+after EXP-001.
+**Why.** They are at most 5% of bytes and do not change what the baseline measures, while being
+the largest block of code before the first training run.
+
+### D-017 — Smoke records are separate from formal experiments
+
+**Decision.** Engineering smoke runs (`SMOKE-*`, `kind: smoke`) are recorded but can never
+support architecture or model-quality conclusions: they carry a fixed limitation and are
+excluded from the ablation table. Formal experiments are `EXP-*`, `kind: formal`.
+**Why.** An overfit smoke test proves the pipeline works; it says nothing about the model, and
+mixing the two would invite exactly that misreading.
+
+### D-018 — CI gate policy
+
+**Decision.** Required CI is workflow `Test` with jobs Quality, Tests (ubuntu-latest), Tests
+(windows-latest) and Security. Every milestone commit needs `scripts/check.py all` locally and
+required CI green on that exact commit; every formal experiment additionally records
+`ci_evidence` for its exact commit. If CI fails for infrastructure (not code) reasons, milestones
+may proceed on local validation until the new discrepancy is closed, but formal experiments stay
+blocked (plan rev 3.3).
+**Why.** Results must never depend on code that CI has not verified, while an external CI outage
+should not freeze engineering work.
+
+### D-019 — Special-token ids are fixed per tokenizer, not across vocabulary sizes
+
+**Decision.** Special tokens occupy the top 32 ids of each vocabulary, so their ids are fixed and
+deterministic within a tokenizer artifact/configuration but differ across vocabulary sizes. Every
+artifact records the exact name → id mapping, and loading rejects any mismatch; tokens are never
+silently renumbered. Ordinary text, including literal special-token strings, never encodes to a
+special id unless the caller allows that name explicitly.
+**Why.** Keeping merges contiguous from id 256 makes smaller vocabularies exact truncations of
+larger ones; recording and validating the mapping prevents silent drift; refusing literal
+special tokens by default prevents data or tool output from injecting control tokens.
+
+### D-020 — Tokenizer training fails instead of shrinking the vocabulary
+
+**Decision.** If the corpus cannot supply enough merges with pair count ≥ `min_pair_count`,
+training raises an error naming how many merges were possible and how many were required.
+**Why.** A silently smaller vocabulary would change parameter counts, special-token ids and
+every downstream comparison. Research tokenizers use `min_pair_count: 2`; the engineering smoke
+tokenizer uses `1` because its fixture supports only 158 merges at 2 (measured).

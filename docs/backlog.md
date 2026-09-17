@@ -32,6 +32,7 @@ _None._
 
 | Item | Hook that exists in 0.1 | Earliest milestone |
 |---|---|---|
+| Synthetic generators (functions, debugging, formats, cs_math, shell) | `local-v2` recipe version (D-016) | `local-v2`, after EXP-001 |
 | Distributed training (DDP/FSDP/TP/PP) | `docs/scaling.md` stages and rule | after single-device correctness at larger scale |
 | Cloud/HPC training | `docs/scaling.md` stage 5 | later |
 | DVC / data platform | deterministic `dataset_version` hash | when the corpus reaches hundreds of GB |

@@ -9,11 +9,24 @@ from those records and CI fails if it is edited by hand or out of sync.
 
 ## Plan authority
 
-The approved plan (currently rev 3.1) is the source of truth. No implementation, repository
+The approved plan (currently rev 3.3) is the source of truth. No implementation, repository
 creation, push, model training, architecture change, dataset expansion or dependency
 expansion happens outside its execution order without an explicit plan revision. If
-implementation shows a decision is wrong: stop, record the discrepancy, revise the plan,
-review, then continue.
+implementation shows a decision is wrong: stop, record the discrepancy (see
+[docs/discrepancies.md](docs/discrepancies.md)), revise the plan, review, then continue.
+
+## CI gate policy
+
+* **Required CI** is the `Test` workflow (`.github/workflows/tests.yml`): Quality,
+  Tests (ubuntu-latest), Tests (windows-latest) and Security. SonarCloud is advisory.
+* **Every commit** passes the pre-commit hook (staged secret scan + artifact guard).
+* **Every milestone commit** passes `python scripts/check.py all` locally (plus `pytest -m gpu`
+  when GPU code changed) **and** has required CI green on that exact commit before the
+  milestone is reported.
+* **Every formal experiment** (EXP-*) records `ci_evidence` for the exact commit it ran on.
+* If CI stops working for infrastructure reasons (not code failures), record a discrepancy;
+  milestones may continue on local validation until it is closed, but formal experiments do not
+  start (D-018).
 
 ## Development setup
 

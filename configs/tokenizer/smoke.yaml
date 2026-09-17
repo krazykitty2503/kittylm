@@ -1,0 +1,13 @@
+kind: tokenizer
+name: smoke-512
+purpose: smoke
+vocab_size: 512
+# The 1.3 KB fixture supports only 158 merges with pair count >= 2 (measured), so the smoke
+# vocabulary allows single-occurrence merges. This memorizes the fixture, which is the point of
+# an overfit smoke test; research tokenizers keep the default of 2.
+min_pair_count: 1
+corpus_files:
+  - tests/fixtures/smoke_corpus.txt
+notes: >-
+  Temporary SMOKE-GPU-001 vocabulary trained by the real kittylm.tokenizer implementation.
+  Engineering-only; never used for formal experiments or any model-quality conclusion.

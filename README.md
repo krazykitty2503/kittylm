@@ -21,26 +21,24 @@ KittyLM is designed as a research component of the broader KittyOS ecosystem. Th
 
 ## Status
 
-The execution contract is the approved **plan rev 3.1**. Work proceeds one step at a time;
-all required CI jobs must pass before the next step starts.
+The execution contract is the approved **plan rev 3.3**. Work proceeds one milestone at a time
+(model-first, D-015). Every milestone commit needs `scripts/check.py all` locally **and** the
+required GitHub CI jobs green on that exact commit (D-018).
 
-| Step | Scope | Status |
-|---:|---|---|
-| 1 | Foundation: repo, config system, security scanner, artifact guard, ledger, CI, docs | **in progress** |
-| 2 | Byte-level BPE tokenizer | not started |
-| 3 | Data pipeline (security-boundary order, deterministic dataset version) | not started |
-| 4 | Synthetic generators | not started |
-| 5 | Build `local-v1`, tokenizer stats, pack | not started |
-| 6 | Model (LLaMA-style baseline), KV cache, parameter accounting | not started |
-| 7 | Training engine, timing metrics, checkpoint/resume | not started |
-| 8 | Evaluation, generation, inference speed | not started |
-| 9 | EXP-000 overfit gate | not started |
-| 10 | EXP-001 baseline | not started |
-| 11 | Vocabulary ablation | not started |
-| 12 | Documentation finalized with measured results | not started |
+| Milestone | Scope | Status |
+|:---:|---|---|
+| Step 1 | Foundation: repo, config system, secret scanner, artifact guard, ledger, CI, docs | done |
+| A | Byte-level BPE tokenizer, smoke tokenizer config, acceptance tests | **in review** |
+| B | Model (LLaMA-style baseline), KV cache, parameter accounting, ROCm attention benchmark (BENCH-ATTN-001) | not started |
+| C | Training engine, checkpoint/resume validation, timing metrics | not started |
+| D | Evaluation, generation, inference speed | not started |
+| E | SMOKE-GPU-001 — engineering-only GPU overfit test (never a quality result) | not started |
+| F | Data pipeline and `local-v1` corpus (synthetic generators deferred to `local-v2`, D-016) | not started |
+| G | Formal experiments: EXP-000 overfit gate, EXP-001 baseline, vocabulary ablation; docs finalized | not started |
 
 No model has been trained. No experiment results exist yet; when they do, they appear only
 in [experiments/ablations.md](experiments/ablations.md), generated from validated records.
+Open discrepancies are listed in [docs/discrepancies.md](docs/discrepancies.md).
 
 ## Repository layout (current)
 
@@ -48,15 +46,18 @@ in [experiments/ablations.md](experiments/ablations.md), generated from validate
 kittylm/            package
   config.py         strict typed YAML configuration
   ledger.py         experiment-record schema, validator, ablation table
+  tokenizer/        byte-level BPE: pre-tokenization, training, encode/decode, artifacts
   data/secrets.py   secret scanner (data pipeline + repository)
   utils/            git access, artifact guard
   export/           future export boundary (README only)
   integration/      future KittyOS contract + feedback loop (README only)
-scripts/            check.py (local == CI), scan_secrets.py, build_ablation_table.py
-tests/              foundation tests
+scripts/            check.py (local == CI), scan_secrets.py, build_ablation_table.py,
+                    train_tokenizer.py
+tests/              foundation, tokenizer acceptance and reference-trainer tests
+tests/fixtures/     hand-written smoke corpus
 experiments/        experiment records and the generated ablation table
-configs/            configuration files (none yet)
-docs/               architecture, decisions, safety, limitations, scaling, backlog
+configs/            tokenizer/smoke.yaml (engineering smoke tokenizer)
+docs/               architecture, decisions, discrepancies, safety, limitations, scaling, backlog
 .github/            CI workflows, templates, CODEOWNERS, Dependabot
 .githooks/          pre-commit hook (secret scan + artifact guard)
 ```
@@ -83,6 +84,12 @@ Run every check CI runs (quality, tests, security):
 
 ```bash
 .venv/Scripts/python scripts/check.py all
+```
+
+Train the engineering smoke tokenizer (the artifact goes to `runs/`, which is never committed):
+
+```bash
+.venv/Scripts/python scripts/train_tokenizer.py --config configs/tokenizer/smoke.yaml
 ```
 
 GPU-only tests are never run in CI; run them locally when relevant:
