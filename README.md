@@ -29,8 +29,8 @@ required GitHub CI jobs green on that exact commit (D-018).
 |:---:|---|---|
 | Step 1 | Foundation: repo, config system, secret scanner, artifact guard, ledger, CI, docs | done |
 | A | Byte-level BPE tokenizer, smoke tokenizer config, acceptance tests | done |
-| B | Model (LLaMA-style baseline), KV cache, parameter accounting, ROCm attention benchmark (BENCH-ATTN-001), D-014 | **in review** |
-| C | Training engine, checkpoint/resume validation, timing metrics | not started |
+| B | Model (LLaMA-style baseline), KV cache, parameter accounting, ROCm attention benchmark (BENCH-ATTN-001), D-014 | done |
+| C | Training engine, checkpoint/resume validation, timing metrics, `ci_evidence` tooling | **in review** |
 | D | Evaluation, generation, inference speed | not started |
 | E | SMOKE-GPU-001 — engineering-only GPU overfit test (never a quality result) | not started |
 | F | Data pipeline and `local-v1` corpus (synthetic generators deferred to `local-v2`, D-016) | not started |
@@ -48,13 +48,15 @@ kittylm/            package
   ledger.py         experiment-record schema, validator, ablation table
   tokenizer/        byte-level BPE: pre-tokenization, training, encode/decode, artifacts
   model/            decoder-only Transformer, attention paths, KV cache, parameter accounting
+  training/         training engine, checkpoints, deterministic resume harness, timing, metrics
   data/secrets.py   secret scanner (data pipeline + repository)
+  data/loader.py    memory-mapped token windows (seeded training order, fixed validation)
   utils/            git access, artifact guard
   export/           future export boundary (README only)
   integration/      future KittyOS contract + feedback loop (README only)
 scripts/            check.py (local == CI), scan_secrets.py, build_ablation_table.py,
-                    train_tokenizer.py, bench_attention.py
-tests/              foundation, tokenizer acceptance and reference-trainer tests
+                    train_tokenizer.py, bench_attention.py, verify_ci.py
+tests/              foundation, tokenizer, model, training and resume tests
 tests/fixtures/     hand-written smoke corpus
 experiments/        experiment records, benchmarks (BENCH-ATTN-001) and the generated ablation table
 configs/            tokenizer/smoke.yaml, model/nano.yaml, model/tiny.yaml

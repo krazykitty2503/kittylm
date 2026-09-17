@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from kittylm.ledger import (
+    REQUIRED_CI_JOBS,
     RESUME_HARNESS,
     LedgerError,
     load_all_records,
@@ -118,6 +119,16 @@ def valid_record() -> dict[str, Any]:
             "checkpoint_resume_test": "not_run",
             "resume_evidence": None,
         },
+        "ci_evidence": {
+            "commit": COMMIT,
+            "workflow": "Test",
+            "run_id": 1,
+            "event": "push",
+            "jobs": {
+                name: {"job_id": i + 1, "conclusion": "success"}
+                for i, name in enumerate(REQUIRED_CI_JOBS)
+            },
+        },
         "limitations": ["synthetic fixture"],
         "notes": "",
     }
@@ -171,6 +182,7 @@ def test_resume_evidence_rules() -> None:
         "kill_step": 5,
         "resumed_to_step": 10,
         "metrics_sha256": SHA,
+        "comparison": {"global_step": "exact"},
     }
     data = mutate("reproducibility.checkpoint_resume_test", "passed")
     data["reproducibility"]["resume_evidence"] = evidence

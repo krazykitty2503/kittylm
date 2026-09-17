@@ -24,6 +24,9 @@ implementation shows a decision is wrong: stop, record the discrepancy (see
   when GPU code changed) **and** has required CI green on that exact commit before the
   milestone is reported.
 * **Every formal experiment** (EXP-*) records `ci_evidence` for the exact commit it ran on.
+  After pushing, capture it with `python scripts/verify_ci.py` (defaults to `HEAD`; writes
+  `runs/ci_evidence/<commit>.json` and exits non-zero unless every required job succeeded). It
+  reads GitHub through the `gh` CLI; never write evidence by hand (D-022).
 * If CI stops working for infrastructure reasons (not code failures), record a discrepancy;
   milestones may continue on local validation until it is closed, but formal experiments do not
   start (D-018).

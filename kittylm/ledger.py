@@ -35,7 +35,11 @@ Failure modes:
     - Any schema or semantic violation raises LedgerError listing all problems.
     - Identifier checks against the local username/hostname only apply at write time; CI
       re-validation cannot know the author's machine and checks paths and secrets instead.
-    - ``ci_evidence`` for formal records arrives with Milestone C and is not validated yet.
+    - Formal records without ``ci_evidence`` proving every required job (REQUIRED_CI_JOBS of
+      workflow ``Test``) succeeded on ``repository.git_commit`` are rejected (D-018). The check is
+      structural (the evidence is produced by scripts/verify_ci.py), not cryptographic.
+    - ``resume_evidence`` is produced only by ``kittylm.training.resume_harness``; a test scans
+      the code base so nothing else constructs it.
 
 See:
     Plan rev 3.3 section 6, D-012 (resume evidence), D-014 (attention selection), D-017.
@@ -83,6 +87,13 @@ __all__ = [
     "validate_record",
     "write_benchmark",
     "write_record",
+    "REQUIRED_CI_JOBS",
+    "REQUIRED_CI_WORKFLOW",
+    "CiEvidence",
+    "CiJob",
+    "ResumeEvidence",
+    "ci_evidence_from_github",
+    "ci_evidence_problems",
 ]
 
 SCHEMA_VERSION = 2
@@ -259,6 +270,71 @@ class ResumeEvidence:
     kill_step: int
     resumed_to_step: int
     metrics_sha256: str
+    comparison: dict[str, str] = field(default_factory=dict)
+
+
+REQUIRED_CI_WORKFLOW = "Test"
+REQUIRED_CI_JOBS: tuple[str, ...] = (
+    "Quality",
+    "Tests (ubuntu-latest)",
+    "Tests (windows-latest)",
+    "Security",
+)
+
+
+@dataclass(frozen=True)
+class CiJob:
+    """One GitHub Actions job result."""
+
+    job_id: int
+    conclusion: str
+
+
+@dataclass(frozen=True)
+class CiEvidence:
+    """Required CI results for the exact commit a formal experiment runs on (D-018)."""
+
+    commit: str
+    workflow: str
+    run_id: int
+    event: str
+    jobs: dict[str, CiJob]
+
+
+def ci_evidence_problems(evidence: CiEvidence | None, commit: str) -> list[str]:
+    """Why ``evidence`` does not prove required CI is green on ``commit`` (empty if it does)."""
+    if evidence is None:
+        return ["ci_evidence is required: run scripts/verify_ci.py on the exact commit"]
+    problems: list[str] = []
+    if evidence.commit != commit:
+        problems.append(f"ci_evidence is for commit {evidence.commit[:10]}, not {commit[:10]}")
+    if evidence.workflow != REQUIRED_CI_WORKFLOW:
+        problems.append(f"ci_evidence workflow must be {REQUIRED_CI_WORKFLOW!r}")
+    if evidence.run_id <= 0:
+        problems.append("ci_evidence.run_id must be a positive GitHub run id")
+    for job in REQUIRED_CI_JOBS:
+        result = evidence.jobs.get(job)
+        if result is None:
+            problems.append(f"ci_evidence is missing required job {job!r}")
+        elif result.conclusion != "success":
+            problems.append(f"required job {job!r} concluded {result.conclusion!r}")
+    return problems
+
+
+def ci_evidence_from_github(
+    run: Mapping[str, Any], jobs: Sequence[Mapping[str, Any]]
+) -> CiEvidence:
+    """Build CiEvidence from GitHub API run and jobs JSON (no network access here)."""
+    return CiEvidence(
+        commit=str(run["head_sha"]),
+        workflow=str(run["name"]),
+        run_id=int(run["id"]),
+        event=str(run["event"]),
+        jobs={
+            str(job["name"]): CiJob(job_id=int(job["id"]), conclusion=str(job["conclusion"]))
+            for job in jobs
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -284,6 +360,7 @@ class ExperimentRecord:
     training: TrainingInfo
     results: ResultsInfo
     reproducibility: ReproducibilityInfo
+    ci_evidence: CiEvidence | None = None
     limitations: list[str] = field(default_factory=list)
     notes: str = ""
 
@@ -412,6 +489,14 @@ def validate_record(record: ExperimentRecord, forbidden_identifiers: Sequence[st
                 problems.append("resume_evidence requires 0 < kill_step < resumed_to_step")
             if not _SHA256_HEX.match(ev.metrics_sha256):
                 problems.append("resume_evidence.metrics_sha256 must be a sha256 hex digest")
+            if not ev.comparison:
+                problems.append("resume_evidence.comparison must summarize every compared category")
+
+    # Required CI evidence (D-018): mandatory for formal experiments.
+    if r.experiment.kind == "formal":
+        problems.extend(ci_evidence_problems(r.ci_evidence, r.repository.git_commit))
+    elif r.ci_evidence is not None:
+        problems.extend(ci_evidence_problems(r.ci_evidence, r.repository.git_commit))
 
     if not r.limitations:
         problems.append("limitations must list at least one known limitation")

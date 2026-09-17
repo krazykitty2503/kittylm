@@ -84,9 +84,17 @@ experiment.
 ### D-012 — Resume status requires harness evidence
 
 **Decision.** `checkpoint_resume_test` may be `passed`/`failed` only with `resume_evidence`
-produced by `kittylm.training.resume_harness` (kill step, resumed step, metrics hash);
-`not_run` carries no evidence.
-**Why.** Makes a fabricated or hand-typed "passed" structurally detectable.
+produced by `kittylm.training.resume_harness` (kill step, resumed step, metrics hash and a
+per-category comparison summary); `not_run` carries no evidence. The harness runs three fresh
+Python processes (uninterrupted to N; to the kill step with a checkpoint; a new process that
+resumes to N) and compares global step, scheduler/LR series, optimizer state, parameters, every
+RNG state (Python, NumPy, torch CPU, torch GPU), loader generator state, loss series, the batch
+indices drawn after the resume and the next batch indices. On CPU (nano, fp32, deterministic)
+every category must be bit-exact; on GPU counters, scheduler, RNG and loader state must be exact
+and tensor/loss differences are reported as a measured maximum absolute deviation. A test
+parses the source tree and fails if anything other than the harness constructs `ResumeEvidence`.
+**Why.** Makes a fabricated or hand-typed "passed" structurally detectable, and proves resume
+across a real process boundary rather than within one interpreter.
 **Limit.** It is a structural check, not cryptographic proof.
 
 ### D-013 — Dev tools pinned exactly; runtime dependencies lower-bounded
@@ -175,3 +183,30 @@ training raises an error naming how many merges were possible and how many were 
 **Why.** A silently smaller vocabulary would change parameter counts, special-token ids and
 every downstream comparison. Research tokenizers use `min_pair_count: 2`; the engineering smoke
 tokenizer uses `1` because its fixture supports only 158 merges at 2 (measured).
+
+### D-021 — Checkpoint format: checksummed header, safe loading, atomic replace
+
+**Decision.** A checkpoint file is one JSON header line (`magic`, `format_version`,
+`payload_sha256`, `payload_bytes`) followed by a `torch.save` payload. Writes go to a temporary
+file in the same directory, are fsynced and then renamed with `os.replace`; `latest.json` is
+written the same way and records the file name and payload checksum. Loading verifies the magic,
+version, length and checksum before calling `torch.load(weights_only=True)`, so arbitrary pickled
+objects are refused. The top-level keys and the metadata keys (config hash, tokenizer sha256,
+dataset version, git commit/dirty, precision, device type, determinism) are fixed whitelists;
+resume refuses a checkpoint whose config hash, tokenizer or dataset version differs from the run.
+**Why.** A crash mid-save must leave the previous checkpoint loadable, corruption must be
+detected rather than silently loaded, a checkpoint must not be able to execute code, and
+environment variables, paths or hostnames cannot leak into a checkpoint through metadata.
+**Limit.** The checksum detects accidental damage, not deliberate tampering by someone who can
+rewrite the header.
+
+### D-022 — `ci_evidence` is read from GitHub, never typed
+
+**Decision.** `scripts/verify_ci.py` asks the GitHub API (via `gh`) for the latest completed
+`push` run of workflow `Test` on the exact commit and records the run id and each required job's
+id and conclusion. The ledger rejects formal records without evidence whose commit matches the
+record and whose four required jobs all concluded `success`; the training engine refuses to start
+a formal run without such evidence or from a dirty working tree.
+**Why.** Formal results must be traceable to code that required CI verified (D-018).
+**Limit.** Like D-012 this is structural: evidence could be hand-written, but it names a run id
+anyone can check on GitHub.

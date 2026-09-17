@@ -290,7 +290,11 @@ def config_hash(obj: Any) -> str:
 CONFIG_KINDS: dict[str, type] = {}
 
 # Modules whose import registers config kinds. Imported lazily by validate_config_tree.
-CONFIG_KIND_MODULES: tuple[str, ...] = ("kittylm.tokenizer.trainer", "kittylm.model.config")
+CONFIG_KIND_MODULES: tuple[str, ...] = (
+    "kittylm.tokenizer.trainer",
+    "kittylm.model.config",
+    "kittylm.training.config",
+)
 
 
 def load_config_kinds() -> None:
