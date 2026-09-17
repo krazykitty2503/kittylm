@@ -11,7 +11,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from kittylm.ledger import LedgerError, load_all_records, render_ablation_table
+from kittylm.ledger import (
+    LedgerError,
+    load_all_benchmarks,
+    load_all_records,
+    render_ablation_table,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "experiments" / "ablations.md"
@@ -34,7 +39,15 @@ def main(argv: list[str] | None = None) -> int:
         if current != rendered:
             print("experiments/ablations.md is out of sync; run scripts/build_ablation_table.py")
             return 1
-        print(f"ablation table: in sync ({len(records)} record(s))")
+        try:
+            benchmarks = load_all_benchmarks(ROOT / "experiments")
+        except LedgerError as exc:
+            print(exc)
+            return 1
+        print(
+            f"ablation table: in sync ({len(records)} record(s)); "
+            f"{len(benchmarks)} benchmark(s) valid"
+        )
         return 0
 
     TABLE.parent.mkdir(parents=True, exist_ok=True)

@@ -6,4 +6,4 @@ Every row is rendered from a validated `experiments/<ID>/record.yaml`. A result 
 a record cannot appear here (see CONTRIBUTING.md). Loss is natural-log cross-entropy; bpb is
 bits per byte, the tokenizer-independent comparison metric (D-003).
 
-_No experiment records yet._
+_No formal experiment records yet._

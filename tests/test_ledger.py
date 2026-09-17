@@ -30,8 +30,13 @@ COMMIT = hashlib.sha1(b"fixture").hexdigest()  # fixture commit id, not a securi
 def valid_record() -> dict[str, Any]:
     loss = 2.0
     return {
-        "schema_version": 1,
-        "experiment": {"id": "EXP-900", "name": "fixture", "description": "test fixture"},
+        "schema_version": 2,
+        "experiment": {
+            "id": "EXP-900",
+            "kind": "formal",
+            "name": "fixture",
+            "description": "test fixture",
+        },
         "repository": {"git_commit": COMMIT, "git_dirty": False},
         "environment": {
             "python": "3.12.10",
@@ -212,7 +217,7 @@ def test_ablation_table_is_deterministic() -> None:
     assert table == render_ablation_table([b, a])
     assert table.index("EXP-100") < table.index("EXP-900")
     assert "81.9" in table  # embedding share 8192 / 10000
-    assert "No experiment records yet" in render_ablation_table([])
+    assert "No formal experiment records yet" in render_ablation_table([])
 
 
 def test_committed_ablation_table_is_in_sync() -> None:

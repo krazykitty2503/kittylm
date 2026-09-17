@@ -1,41 +1,44 @@
-"""Experiment ledger: the schema, validator and writer for ``experiments/<ID>/record.yaml``.
+"""Experiment ledger: schemas, validators and writers for records and benchmarks.
 
 Purpose:
-    Make every reported number traceable to one validated record that pins the code
-    (git commit), data (dataset version), tokenizer, model shape and parameter budget, and
-    training setup. The ablation table is *generated* from records, so a result that is not
-    in a record cannot appear in the repository (CONTRIBUTING.md).
+    Make every reported number traceable to one validated file that pins the code (git
+    commit), data, tokenizer, model shape and parameter budget, and setup. The ablation table is
+    *generated* from formal records, so a result that is not in a record cannot appear in the
+    repository (CONTRIBUTING.md). Engineering measurements (benchmarks) and smoke runs are
+    recorded too, but kept structurally separate from formal experiments (D-017).
 
 Public API:
-    ExperimentRecord (and its section dataclasses)
-        Typed schema; ``schema_version`` identifies the format.
+    ExperimentRecord (and its section dataclasses), schema version 2
+        ``experiment.kind`` is ``formal`` (``EXP-###[-suffix]``) or ``smoke``
+        (``SMOKE-<AREA>-###``, must carry SMOKE_LIMITATION).
+    parse_record / validate_record / render_record / write_record / load_record /
+    load_all_records / render_ablation_table (formal records only)
+    BenchmarkRecord (and its section dataclasses)
+        ``experiments/BENCH-<AREA>-###/benchmark.yaml``.
+    parse_benchmark / validate_benchmark / render_benchmark / write_benchmark /
+    load_benchmark / load_all_benchmarks / select_attention_path
     LedgerError
         Raised with every problem found, not just the first.
-    parse_record(data, forbidden_identifiers=()) -> ExperimentRecord
-        Strict structural parse followed by semantic validation.
-    validate_record(record, forbidden_identifiers=()) -> None
-    render_record(record) -> str
-        Deterministic YAML (schema field order, no timestamps).
-    write_record(record, repo_root) -> Path
-        Validate with local user/host identifiers forbidden, secret-scan, write atomically.
-    load_record(path) / load_all_records(experiments_dir)
-    render_ablation_table(records) -> str
 
 Invariants:
     - Parameter accounting parts sum exactly to ``total``; ``non_embedding = total - embedding``.
     - ``final_ppl == exp(final_loss)`` within a relative tolerance of 1e-3 (natural-log loss).
     - ``checkpoint_resume_test`` is ``passed``/``failed`` only with evidence produced by the
       resume harness (RESUME_HARNESS); ``not_run`` must carry no evidence.
-    - Records contain no absolute paths, no local username/hostname, and no secrets.
-    - ``render_ablation_table`` output depends only on record contents.
+    - Smoke records always state they are engineering-only and never enter the ablation table.
+    - A benchmark covers its whole grid (every variant x flag setting x length exactly once),
+      every non-ok cell explains itself, and its recorded selection equals the selection
+      recomputed from its cells.
+    - Files contain no absolute paths, no local username/hostname, and no secrets.
 
 Failure modes:
     - Any schema or semantic violation raises LedgerError listing all problems.
     - Identifier checks against the local username/hostname only apply at write time; CI
       re-validation cannot know the author's machine and checks paths and secrets instead.
+    - ``ci_evidence`` for formal records arrives with Milestone C and is not validated yet.
 
 See:
-    Plan rev 3.1 section 6, D-012 (resume evidence), SECURITY.md.
+    Plan rev 3.3 section 6, D-012 (resume evidence), D-014 (attention selection), D-017.
 """
 
 from __future__ import annotations
@@ -57,26 +60,42 @@ from kittylm.config import ConfigError, from_dict, load_yaml, to_dict
 from kittylm.data.secrets import scan_text
 
 __all__ = [
+    "BENCHMARK_STATUSES",
     "RESUME_HARNESS",
     "SCHEMA_VERSION",
+    "SMOKE_LIMITATION",
+    "BenchmarkCell",
+    "BenchmarkRecord",
     "ExperimentRecord",
     "LedgerError",
+    "load_all_benchmarks",
     "load_all_records",
+    "load_benchmark",
     "load_record",
     "local_identifiers",
+    "parse_benchmark",
     "parse_record",
     "render_ablation_table",
+    "render_benchmark",
     "render_record",
+    "select_attention_path",
+    "validate_benchmark",
     "validate_record",
+    "write_benchmark",
     "write_record",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RESUME_HARNESS = "kittylm.training.resume_harness"
 PPL_REL_TOL = 1e-3
 RATIO_REL_TOL = 1e-3
+SMOKE_LIMITATION = (
+    "SMOKE: engineering-only test. Must not be used for architecture or model-quality conclusions."
+)
 
 _EXPERIMENT_ID = re.compile(r"^EXP-\d{3}(?:-[a-z0-9]+)*$")
+_SMOKE_ID = re.compile(r"^SMOKE-[A-Z0-9]+-\d{3}$")
+_BENCHMARK_ID = re.compile(r"^BENCH-[A-Z0-9]+-\d{3}$")
 _SHA1_HEX = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _ABSOLUTE_PATH = re.compile(
@@ -97,6 +116,7 @@ class ExperimentInfo:
     """Identity of the experiment."""
 
     id: str
+    kind: Literal["formal", "smoke"]
     name: str
     description: str
 
@@ -306,8 +326,13 @@ def validate_record(record: ExperimentRecord, forbidden_identifiers: Sequence[st
 
     if r.schema_version != SCHEMA_VERSION:
         problems.append(f"schema_version must be {SCHEMA_VERSION}, got {r.schema_version}")
-    if not _EXPERIMENT_ID.match(r.experiment.id):
-        problems.append(f"experiment.id {r.experiment.id!r} must match EXP-###[-suffix]")
+    if r.experiment.kind == "formal" and not _EXPERIMENT_ID.match(r.experiment.id):
+        problems.append(f"formal experiment.id {r.experiment.id!r} must match EXP-###[-suffix]")
+    if r.experiment.kind == "smoke":
+        if not _SMOKE_ID.match(r.experiment.id):
+            problems.append(f"smoke experiment.id {r.experiment.id!r} must match SMOKE-<AREA>-###")
+        if SMOKE_LIMITATION not in r.limitations:
+            problems.append("smoke records must list the SMOKE engineering-only limitation")
     if not _SHA1_HEX.match(r.repository.git_commit):
         problems.append("repository.git_commit must be a full 40-character lowercase hash")
     for field_name, digest in (
@@ -522,14 +547,15 @@ _COLUMNS = (
 
 
 def render_ablation_table(records: Sequence[ExperimentRecord]) -> str:
-    """Render the ablation table markdown from records (deterministic)."""
+    """Render the ablation table markdown from *formal* records only (deterministic)."""
     lines = [_TABLE_HEADER]
-    if not records:
-        lines.append("_No experiment records yet._\n")
+    formal = [rec for rec in records if rec.experiment.kind == "formal"]
+    if not formal:
+        lines.append("_No formal experiment records yet._\n")
         return "\n".join(lines)
     lines.append("| " + " | ".join(_COLUMNS) + " |")
     lines.append("|" + "|".join("---" for _ in _COLUMNS) + "|")
-    for rec in sorted(records, key=lambda x: x.experiment.id):
+    for rec in sorted(formal, key=lambda x: x.experiment.id):
         p = rec.model.parameters
         commit = rec.repository.git_commit[:10] + (" (dirty)" if rec.repository.git_dirty else "")
         row = (
@@ -554,3 +580,299 @@ def render_ablation_table(records: Sequence[ExperimentRecord]) -> str:
         )
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines) + "\n"
+
+
+# ================================================================================================
+# Benchmarks (engineering measurements, e.g. BENCH-ATTN-001)
+# ================================================================================================
+
+BENCHMARK_STATUSES = ("ok", "unsupported", "oom", "error", "mismatch", "nonfinite")
+ORACLE_VARIANT_PREFIX = "reference@"
+SELECTION_DTYPE = "bf16"
+
+
+@dataclass(frozen=True)
+class BenchmarkInfo:
+    """Identity of a benchmark."""
+
+    id: str
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class BenchmarkEnvironment:
+    """Software and hardware environment (no hostnames, usernames or paths)."""
+
+    python: str
+    pytorch: str
+    backend: Literal["rocm", "cuda", "cpu"]
+    backend_version: str | None
+    device: str
+    os: str
+
+
+@dataclass(frozen=True)
+class BenchmarkGrid:
+    """The full measurement grid; every combination must appear exactly once in ``cells``."""
+
+    variants: list[str]  # "<attention path>@<dtype>", e.g. "sdpa_math@bf16"
+    flag_settings: list[str]  # values of TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: "unset", "1"
+    sequence_lengths: list[int]
+    tokens_per_batch: int
+    n_heads: int
+    head_dim: int
+    warmup_iterations: int
+    min_iterations: int
+    max_iterations: int
+    min_measure_seconds: float
+    relative_tolerance: float
+    selection_lengths: list[int]
+
+
+@dataclass(frozen=True)
+class BenchmarkCell:
+    """One measured (variant, flag setting, sequence length) combination."""
+
+    variant: str
+    flag_setting: str
+    seq_len: int
+    batch_size: int
+    status: Literal["ok", "unsupported", "oom", "error", "mismatch", "nonfinite"]
+    iterations: int | None
+    tokens_per_second: float | None
+    first_call_seconds: float | None
+    peak_vram_mib: float | None
+    allocated_vram_mib: float | None
+    max_abs_diff_output: float | None
+    max_abs_diff_grad: float | None
+    relative_diff_output: float | None
+    relative_diff_grad: float | None
+    detail: str
+
+
+@dataclass(frozen=True)
+class BenchmarkSelection:
+    """Decision derived from the cells (for BENCH-ATTN-001: D-014)."""
+
+    decision: str
+    variant: str
+    flag_setting: str
+    rule: str
+    tokens_per_second_by_length: dict[str, float]
+
+
+@dataclass(frozen=True)
+class BenchmarkRecord:
+    """A complete, validated benchmark."""
+
+    schema_version: int
+    benchmark: BenchmarkInfo
+    repository: RepositoryInfo
+    environment: BenchmarkEnvironment
+    grid: BenchmarkGrid
+    cells: list[BenchmarkCell]
+    selection: BenchmarkSelection
+    limitations: list[str] = field(default_factory=list)
+    notes: str = ""
+
+
+SELECTION_RULE = (
+    "Fastest bf16 variant (by tokens/s at the largest selection length) whose cells are ok at "
+    "every selection length for one flag setting and whose outputs and gradients match the "
+    "bf16 reference within the relative tolerance; ties prefer flag 'unset', then grid order."
+)
+
+
+def _cell_equivalent(cell: BenchmarkCell, tolerance: float) -> bool:
+    if cell.variant.startswith(ORACLE_VARIANT_PREFIX):
+        return True  # the reference implementation is the oracle itself
+    if cell.relative_diff_output is None or cell.relative_diff_grad is None:
+        return False
+    return cell.relative_diff_output <= tolerance and cell.relative_diff_grad <= tolerance
+
+
+def select_attention_path(
+    grid: BenchmarkGrid, cells: Sequence[BenchmarkCell]
+) -> BenchmarkSelection | None:
+    """Recompute the D-014 selection from cells (``None`` if nothing qualifies)."""
+    index = {(c.variant, c.flag_setting, c.seq_len): c for c in cells}
+    largest = max(grid.selection_lengths)
+    candidates: list[tuple[float, int, int, str, str]] = []
+    for flag_rank, flag in enumerate(grid.flag_settings):
+        for variant_rank, variant in enumerate(grid.variants):
+            if not variant.endswith("@" + SELECTION_DTYPE):
+                continue
+            chosen = [index.get((variant, flag, length)) for length in grid.selection_lengths]
+            if any(
+                c is None
+                or c.status != "ok"
+                or c.tokens_per_second is None
+                or not _cell_equivalent(c, grid.relative_tolerance)
+                for c in chosen
+            ):
+                continue
+            speed = index[(variant, flag, largest)].tokens_per_second
+            assert speed is not None
+            candidates.append((-speed, flag_rank, variant_rank, variant, flag))
+    if not candidates:
+        return None
+    _, _, _, variant, flag = min(candidates)
+    by_length = {
+        str(length): float(index[(variant, flag, length)].tokens_per_second or 0.0)
+        for length in grid.selection_lengths
+    }
+    return BenchmarkSelection(
+        decision="D-014",
+        variant=variant,
+        flag_setting=flag,
+        rule=SELECTION_RULE,
+        tokens_per_second_by_length=by_length,
+    )
+
+
+def validate_benchmark(record: BenchmarkRecord, forbidden_identifiers: Sequence[str] = ()) -> None:
+    """Check completeness, per-cell consistency and the recomputed selection.
+
+    Raises:
+        LedgerError: Listing every violated invariant.
+    """
+    problems: list[str] = []
+    r = record
+    g = r.grid
+    if r.schema_version != SCHEMA_VERSION:
+        problems.append(f"schema_version must be {SCHEMA_VERSION}, got {r.schema_version}")
+    if not _BENCHMARK_ID.match(r.benchmark.id):
+        problems.append(f"benchmark.id {r.benchmark.id!r} must match BENCH-<AREA>-###")
+    if not _SHA1_HEX.match(r.repository.git_commit):
+        problems.append("repository.git_commit must be a full 40-character lowercase hash")
+    if not set(g.selection_lengths) <= set(g.sequence_lengths) or not g.selection_lengths:
+        problems.append("grid.selection_lengths must be a non-empty subset of sequence_lengths")
+    if not 0 < g.relative_tolerance < 1:
+        problems.append("grid.relative_tolerance must be in (0, 1)")
+    if not 1 <= g.min_iterations <= g.max_iterations:
+        problems.append("grid requires 1 <= min_iterations <= max_iterations")
+    for variant in g.variants:
+        if "@" not in variant:
+            problems.append(f"grid variant {variant!r} must look like '<path>@<dtype>'")
+
+    expected = {(v, f, n) for v in g.variants for f in g.flag_settings for n in g.sequence_lengths}
+    seen: dict[tuple[str, str, int], int] = {}
+    for cell in r.cells:
+        key = (cell.variant, cell.flag_setting, cell.seq_len)
+        seen[key] = seen.get(key, 0) + 1
+        where = f"cell {cell.variant} flag={cell.flag_setting} T={cell.seq_len}"
+        measured = (cell.tokens_per_second, cell.iterations, cell.first_call_seconds)
+        if cell.status in ("ok", "mismatch"):
+            if any(value is None for value in measured) or (cell.tokens_per_second or 0) <= 0:
+                problems.append(f"{where}: {cell.status} cells need throughput and iterations")
+            elif cell.iterations is not None and cell.iterations < g.min_iterations:
+                problems.append(f"{where}: fewer than min_iterations measured")
+            oracle = cell.variant.startswith(ORACLE_VARIANT_PREFIX)
+            diffs = (cell.relative_diff_output, cell.relative_diff_grad)
+            if not oracle and cell.status == "ok" and any(d is None for d in diffs):
+                if "reference unavailable" not in cell.detail:
+                    problems.append(f"{where}: missing diffs must explain 'reference unavailable'")
+            if not oracle and all(d is not None for d in diffs):
+                within = _cell_equivalent(cell, g.relative_tolerance)
+                if cell.status == "ok" and not within:
+                    problems.append(f"{where}: diffs exceed tolerance but status is ok")
+                if cell.status == "mismatch" and within:
+                    problems.append(f"{where}: status mismatch but diffs are within tolerance")
+        else:
+            if not cell.detail.strip():
+                problems.append(f"{where}: {cell.status} cells must explain themselves in detail")
+            if cell.tokens_per_second is not None:
+                problems.append(f"{where}: {cell.status} cells cannot report throughput")
+    missing = sorted(expected - set(seen))
+    extra = sorted(set(seen) - expected)
+    duplicated = sorted(key for key, count in seen.items() if count > 1)
+    if missing:
+        problems.append(f"grid cells missing: {missing[:5]}{' ...' if len(missing) > 5 else ''}")
+    if extra:
+        problems.append(f"cells outside the grid: {extra[:5]}")
+    if duplicated:
+        problems.append(f"duplicated cells: {duplicated[:5]}")
+
+    if not missing and not extra and not duplicated:
+        recomputed = select_attention_path(g, r.cells)
+        if recomputed is None:
+            problems.append("no variant qualifies for selection; the benchmark cannot decide D-014")
+        elif recomputed != r.selection:
+            problems.append(
+                f"recorded selection {r.selection.variant}/{r.selection.flag_setting} does not "
+                f"match the recomputed selection {recomputed.variant}/{recomputed.flag_setting}"
+            )
+
+    if not r.limitations:
+        problems.append("limitations must list at least one known limitation")
+    plain = to_dict(r)
+    for path, text in _iter_strings(plain, "benchmark"):
+        if _ABSOLUTE_PATH.search(text):
+            problems.append(f"{path} contains an absolute path")
+        for ident in forbidden_identifiers:
+            pattern = rf"(?<![A-Za-z0-9]){re.escape(ident)}(?![A-Za-z0-9])"
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                problems.append(f"{path} contains a local username/hostname")
+    findings = scan_text(render_benchmark(r))
+    if findings:
+        problems.append(
+            f"rendered benchmark trips the secret scanner ({sorted({f.rule for f in findings})})"
+        )
+    if problems:
+        raise LedgerError(problems)
+
+
+def parse_benchmark(
+    data: Mapping[str, Any], forbidden_identifiers: Sequence[str] = ()
+) -> BenchmarkRecord:
+    """Parse plain data into a validated BenchmarkRecord."""
+    try:
+        record = from_dict(BenchmarkRecord, data)
+    except ConfigError as exc:
+        raise LedgerError([str(exc)]) from exc
+    validate_benchmark(record, forbidden_identifiers)
+    return record
+
+
+def render_benchmark(record: BenchmarkRecord) -> str:
+    """Render a benchmark as deterministic YAML in schema field order."""
+    return yaml.safe_dump(to_dict(record), sort_keys=False, allow_unicode=True, width=100)
+
+
+def write_benchmark(record: BenchmarkRecord, repo_root: Path) -> Path:
+    """Validate and atomically write ``experiments/<BENCH-ID>/benchmark.yaml``."""
+    validate_benchmark(record, forbidden_identifiers=local_identifiers())
+    target = repo_root / "experiments" / record.benchmark.id / "benchmark.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".benchmark-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(render_benchmark(record))
+        os.replace(tmp_name, target)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return target
+
+
+def load_benchmark(path: Path) -> BenchmarkRecord:
+    """Load and validate a benchmark; its directory name must equal the benchmark id."""
+    try:
+        data = load_yaml(path)
+    except ConfigError as exc:
+        raise LedgerError([f"{path.parent.name}/{path.name}: {exc}"]) from exc
+    record = parse_benchmark(data)
+    if path.parent.name != record.benchmark.id:
+        raise LedgerError(
+            [f"benchmark directory {path.parent.name!r} != benchmark.id {record.benchmark.id!r}"]
+        )
+    return record
+
+
+def load_all_benchmarks(experiments_dir: Path) -> list[BenchmarkRecord]:
+    """Load every ``<experiments_dir>/*/benchmark.yaml`` sorted by benchmark id."""
+    if not experiments_dir.is_dir():
+        return []
+    records = [load_benchmark(p) for p in sorted(experiments_dir.glob("*/benchmark.yaml"))]
+    return sorted(records, key=lambda rec: rec.benchmark.id)
