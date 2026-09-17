@@ -10,7 +10,8 @@ guarantee.
 | Secrets never enter records | Ledger validation secret-scans the rendered record before writing | **implemented** (step 1) |
 | Test failures cannot print environment secrets | Git/hook test sandboxes strip credential-named environment variables and never render their environment | **implemented** (step 1) |
 | Secrets never enter datasets or manifests | Documents pass license validation and the secret scan before anything is written; hits drop the whole document (D-006) | planned (step 3) |
-| Secrets never enter logs, checkpoints or samples | Checkpoint metadata whitelist; samples scanned and redacted before saving | planned (steps 7–8) |
+| Secrets never enter checkpoints | Fixed top-level and metadata key whitelists enforced on write and load; `weights_only` loading refuses arbitrary objects (D-021) | **implemented** (Milestone C) |
+| Secrets never enter logs or samples | Metrics are numeric only; samples scanned and redacted before saving | planned (Milestone D) |
 | Special tokens cannot be injected from text | Tokenizer never produces special-token ids from raw text unless a name is explicitly allowed; all 32 names, embedded, adjacent, nested and prefix-like forms are tested (D-019) | **implemented** (Milestone A) |
 | No outbound network requests in 0.1 | See below | planned (checked from step 8) |
 | No telemetry | KittyLM contains no telemetry code | **true today** (nothing is sent anywhere) |

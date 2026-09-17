@@ -24,7 +24,9 @@ Invariants:
     - Parameter accounting parts sum exactly to ``total``; ``non_embedding = total - embedding``.
     - ``final_ppl == exp(final_loss)`` within a relative tolerance of 1e-3 (natural-log loss).
     - ``checkpoint_resume_test`` is ``passed``/``failed`` only with evidence produced by the
-      resume harness (RESUME_HARNESS); ``not_run`` must carry no evidence.
+      resume harness (RESUME_HARNESS); ``not_run`` must carry no evidence. The evidence's
+      comparison covers every RESUME_CATEGORIES entry, and ``passed`` requires every
+      RESUME_EXACT_REQUIRED category for its device type to be ``exact``.
     - Smoke records always state they are engineering-only and never enter the ablation table.
     - A benchmark covers its whole grid (every variant x flag setting x length exactly once),
       every non-ok cell explains itself, and its recorded selection equals the selection
@@ -35,7 +37,12 @@ Failure modes:
     - Any schema or semantic violation raises LedgerError listing all problems.
     - Identifier checks against the local username/hostname only apply at write time; CI
       re-validation cannot know the author's machine and checks paths and secrets instead.
-    - ``ci_evidence`` for formal records arrives with Milestone C and is not validated yet.
+    - Formal records without ``ci_evidence`` proving every required job (REQUIRED_CI_JOBS of
+      workflow ``Test``, event ``push``) succeeded on ``repository.git_commit`` are rejected
+      (D-018, D-022). The check is
+      structural (the evidence is produced by scripts/verify_ci.py), not cryptographic.
+    - ``resume_evidence`` is produced only by ``kittylm.training.resume_harness``; a test scans
+      the code base so nothing else constructs it.
 
 See:
     Plan rev 3.3 section 6, D-012 (resume evidence), D-014 (attention selection), D-017.
@@ -83,10 +90,50 @@ __all__ = [
     "validate_record",
     "write_benchmark",
     "write_record",
+    "REQUIRED_CI_EVENT",
+    "REQUIRED_CI_JOBS",
+    "REQUIRED_CI_WORKFLOW",
+    "RESUME_CATEGORIES",
+    "RESUME_EXACT_REQUIRED",
+    "CiEvidence",
+    "CiJob",
+    "ResumeEvidence",
+    "ci_evidence_from_github",
+    "ci_evidence_problems",
 ]
 
 SCHEMA_VERSION = 2
 RESUME_HARNESS = "kittylm.training.resume_harness"
+# Every category the resume harness compares (D-012). ``device_type`` is recorded alongside.
+RESUME_CATEGORIES: tuple[str, ...] = (
+    "global_step",
+    "tokens_seen",
+    "skipped_steps",
+    "scheduler",
+    "learning_rates",
+    "optimizer_state",
+    "grad_scaler",
+    "model_parameters",
+    "best_val_loss",
+    "rng_python",
+    "rng_numpy",
+    "rng_torch",
+    "rng_cuda",
+    "loader_state",
+    "loss_series",
+    "batch_indices",
+    "next_batch_indices",
+)
+# Categories that must be bit-exact for a resume test to pass, per device type. On GPUs, kernel
+# nondeterminism may perturb tensors and losses, which are then reported as measured deviations.
+RESUME_EXACT_REQUIRED: dict[str, tuple[str, ...]] = {
+    "cpu": RESUME_CATEGORIES,
+    "cuda": tuple(
+        c
+        for c in RESUME_CATEGORIES
+        if c not in ("optimizer_state", "model_parameters", "loss_series")
+    ),
+}
 PPL_REL_TOL = 1e-3
 RATIO_REL_TOL = 1e-3
 SMOKE_LIMITATION = (
@@ -259,6 +306,100 @@ class ResumeEvidence:
     kill_step: int
     resumed_to_step: int
     metrics_sha256: str
+    comparison: dict[str, str] = field(default_factory=dict)
+
+
+REQUIRED_CI_WORKFLOW = "Test"
+REQUIRED_CI_EVENT = "push"
+REQUIRED_CI_JOBS: tuple[str, ...] = (
+    "Quality",
+    "Tests (ubuntu-latest)",
+    "Tests (windows-latest)",
+    "Security",
+)
+
+
+@dataclass(frozen=True)
+class CiJob:
+    """One GitHub Actions job result."""
+
+    job_id: int
+    conclusion: str
+
+
+@dataclass(frozen=True)
+class CiEvidence:
+    """Required CI results for the exact commit a formal experiment runs on (D-018)."""
+
+    commit: str
+    workflow: str
+    run_id: int
+    event: str
+    jobs: dict[str, CiJob]
+
+
+def ci_evidence_problems(evidence: CiEvidence | None, commit: str) -> list[str]:
+    """Why ``evidence`` does not prove required CI is green on ``commit`` (empty if it does)."""
+    if evidence is None:
+        return ["ci_evidence is required: run scripts/verify_ci.py on the exact commit"]
+    problems: list[str] = []
+    if evidence.commit != commit:
+        problems.append(f"ci_evidence is for commit {evidence.commit[:10]}, not {commit[:10]}")
+    if evidence.workflow != REQUIRED_CI_WORKFLOW:
+        problems.append(f"ci_evidence workflow must be {REQUIRED_CI_WORKFLOW!r}")
+    if evidence.event != REQUIRED_CI_EVENT:
+        # A pull_request run tests a merge preview, not the commit itself (D-022).
+        problems.append(f"ci_evidence event must be {REQUIRED_CI_EVENT!r}, not {evidence.event!r}")
+    if evidence.run_id <= 0:
+        problems.append("ci_evidence.run_id must be a positive GitHub run id")
+    for job in REQUIRED_CI_JOBS:
+        result = evidence.jobs.get(job)
+        if result is None:
+            problems.append(f"ci_evidence is missing required job {job!r}")
+        elif result.conclusion != "success":
+            problems.append(f"required job {job!r} concluded {result.conclusion!r}")
+    return problems
+
+
+def _resume_comparison_problems(comparison: Mapping[str, str], status: str) -> list[str]:
+    """The comparison must be complete and consistent with the recorded resume status."""
+    device_type = comparison.get("device_type")
+    if device_type not in RESUME_EXACT_REQUIRED:
+        return [
+            f"resume_evidence.comparison.device_type must be one of {sorted(RESUME_EXACT_REQUIRED)}"
+        ]
+    problems: list[str] = []
+    missing = [c for c in RESUME_CATEGORIES if c not in comparison]
+    if missing:
+        problems.append(f"resume_evidence.comparison is missing categories {missing}")
+    unknown = sorted(set(comparison) - set(RESUME_CATEGORIES) - {"device_type"})
+    if unknown:
+        problems.append(f"resume_evidence.comparison has unknown categories {unknown}")
+    required = RESUME_EXACT_REQUIRED[device_type]
+    not_exact = [c for c in required if c in comparison and comparison[c] != "exact"]
+    if status == "passed" and not_exact:
+        problems.append(
+            f"checkpoint_resume_test=passed but {device_type} categories {not_exact} are not exact"
+        )
+    if status == "failed" and not missing and not not_exact:
+        problems.append("checkpoint_resume_test=failed but every required category is exact")
+    return problems
+
+
+def ci_evidence_from_github(
+    run: Mapping[str, Any], jobs: Sequence[Mapping[str, Any]]
+) -> CiEvidence:
+    """Build CiEvidence from GitHub API run and jobs JSON (no network access here)."""
+    return CiEvidence(
+        commit=str(run["head_sha"]),
+        workflow=str(run["name"]),
+        run_id=int(run["id"]),
+        event=str(run["event"]),
+        jobs={
+            str(job["name"]): CiJob(job_id=int(job["id"]), conclusion=str(job["conclusion"]))
+            for job in jobs
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -284,6 +425,7 @@ class ExperimentRecord:
     training: TrainingInfo
     results: ResultsInfo
     reproducibility: ReproducibilityInfo
+    ci_evidence: CiEvidence | None = None
     limitations: list[str] = field(default_factory=list)
     notes: str = ""
 
@@ -412,6 +554,13 @@ def validate_record(record: ExperimentRecord, forbidden_identifiers: Sequence[st
                 problems.append("resume_evidence requires 0 < kill_step < resumed_to_step")
             if not _SHA256_HEX.match(ev.metrics_sha256):
                 problems.append("resume_evidence.metrics_sha256 must be a sha256 hex digest")
+            problems.extend(_resume_comparison_problems(ev.comparison, rep.checkpoint_resume_test))
+
+    # Required CI evidence (D-018): mandatory for formal experiments.
+    if r.experiment.kind == "formal":
+        problems.extend(ci_evidence_problems(r.ci_evidence, r.repository.git_commit))
+    elif r.ci_evidence is not None:
+        problems.extend(ci_evidence_problems(r.ci_evidence, r.repository.git_commit))
 
     if not r.limitations:
         problems.append("limitations must list at least one known limitation")

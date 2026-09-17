@@ -77,7 +77,8 @@ Export, KittyOS integration and the feedback loop are architectural boundaries o
 | Dense Transformer baseline, KV cache, accounting | `kittylm/model/` | B | implemented, tested (CPU + GPU) |
 | BENCH-ATTN-001 → D-014 (`reference@bf16`) | `experiments/BENCH-ATTN-001/`, `scripts/bench_attention.py` | B | measured |
 | Ledger schema v2 (record kinds, benchmark schema) | `kittylm/ledger.py` | B | implemented, tested |
-| Training engine + resume validation | `kittylm/training/` | C | not started |
+| Training engine, checkpoints, resume harness | `kittylm/training/`, `kittylm/data/loader.py` | C | implemented, tested (CPU bit-exact; GPU measured) |
+| CI evidence (`verify_ci.py`) | `scripts/verify_ci.py`, `kittylm/ledger.py` | C | implemented, tested |
 | Evaluation + generation | `kittylm/evaluation/`, `kittylm/inference/` | D | not started |
 | SMOKE-GPU-001 (engineering-only) | `experiments/SMOKE-GPU-001/` | E | not started |
 | Data pipeline + `local-v1` | `kittylm/data/` | F | not started |
@@ -130,4 +131,29 @@ Export, KittyOS integration and the feedback loop are architectural boundaries o
 - **Parameter accounting in practice**: `tiny` (d 384, 6 layers, FFN 1024, vocab 16,384) has
   16,913,280 parameters: 6,291,456 embedding (37%, shared with the LM head), 3,538,944 attention,
   7,077,888 MLP, 4,992 normalization, 0 positional, 0 extra output.
-- **Asynchronous GPU timing** is documented with the training engine (Milestone C).
+- **The training step** (`kittylm/training/engine.py`): set the learning rate for this step
+  (linear warmup, then cosine decay to a floor) → for each micro-batch run forward under the
+  precision policy, divide the loss by the accumulation count and backpropagate → clip the global
+  gradient norm to 1.0 → AdamW step (weight decay only on matrices, not gains) → advance counters.
+  A non-finite loss or gradient norm saves a `crash` checkpoint and stops before the bad update;
+  that checkpoint holds the loader and RNG state from *before* the step, so a retry replays it.
+- **fp16 loss scaling**: fp16 gradients can overflow. The loss scaler detects inf/NaN gradients,
+  skips that optimizer update and lowers the scale. A skipped attempt does not count as a step:
+  the schedule, `global_step` and `tokens_seen` stay put, the skip is counted and logged, and the
+  next attempt uses the next batches. Thirty skips in a row stop the run.
+- **Validation**: fixed, non-overlapping windows; the loss is averaged per *token*, so a smaller
+  final batch is not over-weighted. With `eval_every > 0` the engine validates on schedule, and
+  `best_val.pt` is replaced only when the loss beats the checkpointed best.
+- **Precision**: bf16 autocast keeps fp32 master weights and runs matmuls in bf16; fp16 would
+  additionally need a gradient scaler; the loss is always computed in fp32.
+- **Asynchronous GPU timing**: GPU kernels are queued and return immediately, so a wall-clock
+  timer around `model(x)` measures only the enqueueing. The step timer calls
+  `torch.cuda.synchronize()` at phase boundaries, but only every `timing_sync_every` steps,
+  because synchronizing every step would itself slow training.
+- **Checkpoints** (D-021): header with checksum + `weights_only` payload, written to a temporary
+  file and atomically renamed; `latest.json` is replaced the same way, so a crash at any moment
+  leaves a loadable previous checkpoint.
+- **Deterministic resume** (D-012): a checkpoint holds everything that decides the future (model,
+  optimizer moments and step counts, scheduler step, global step and tokens seen, every RNG state
+  and the loader's generator). The harness proves it by resuming in a fresh process and comparing
+  all of these with an uninterrupted run.

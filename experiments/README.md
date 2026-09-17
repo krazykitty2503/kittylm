@@ -21,6 +21,8 @@ committed.
   username or hostname, no secrets, at least one stated limitation.
 - Unmeasured values are `null`. `checkpoint_resume_test` is `not_run` unless the resume harness
   actually ran and produced evidence (D-012).
+- Formal records (EXP-*) carry `ci_evidence` for their exact commit, captured by
+  `scripts/verify_ci.py` (D-022); smoke records may omit it.
 - The directory name must equal `experiment.id`.
 
 ## Planned experiments (0.1)
