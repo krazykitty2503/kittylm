@@ -33,6 +33,7 @@ IDENTITY = RunIdentity("a" * 64, "b" * 64, "c" * 64)
 def state(step: int = 1, **metadata_changes: Any) -> dict[str, Any]:
     metadata = {
         "config_hash": IDENTITY.config_hash,
+        "model_config_sha256": "f" * 64,
         "tokenizer_sha256": IDENTITY.tokenizer_sha256,
         "dataset_version": IDENTITY.dataset_version,
         "git_commit": "d" * 40,
@@ -83,7 +84,12 @@ def test_whitelists_are_enforced_on_write(tmp_path: Path) -> None:
         (lambda b: b[:-10], "truncated"),
         (lambda b: b[:-1] + bytes([b[-1] ^ 0xFF]), "checksum mismatch"),
         (lambda b: b.replace(b"kittylm-checkpoint", b"other-checkpoint!!"), "not a KittyLM"),
-        (lambda b: b.replace(b'"format_version": 2', b'"format_version": 9'), "format version"),
+        (
+            lambda b: b.replace(
+                f'"format_version": {FORMAT_VERSION}'.encode(), b'"format_version": 9'
+            ),
+            "format version",
+        ),
         (lambda b: b"garbage without header", "missing checkpoint header"),
         (lambda b: b"{not json\n" + b, "unreadable checkpoint header"),
     ],

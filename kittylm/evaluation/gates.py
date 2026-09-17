@@ -33,13 +33,14 @@ Device:
     The model runs on ``device``; all gate arithmetic happens on the host.
 
 Invariants:
-    - ``final_ppl == math.exp(final_loss)`` exactly, and ``checks["ppl_consistent"]`` re-checks
-      it with the ledger tolerance so a record written from this report validates.
+    - ``final_ppl == math.exp(final_loss)`` exactly (``inf`` beyond float range), and
+      ``checks["ppl_consistent"]`` re-checks it with the ledger tolerance so a record written
+      from this report validates.
     - ``passed`` is True only if every entry of ``checks`` is True; ``failures`` names the rest.
     - Generation is greedy with no EOT stop, so it always produces ``len(ids) - prompt_tokens``
       tokens to compare; missing or extra tokens count as mismatches.
     - Logger values written as the strings ``"nan"``, ``"inf"`` or ``"-inf"`` count as
-      non-finite.
+      non-finite, at any depth of nested mappings, lists and tuples.
 
 Failure modes:
     - A fixture no longer than ``prompt_tokens`` raises ValueError (nothing to compare).
@@ -60,7 +61,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from kittylm.evaluation.perplexity import ppl_is_consistent, stream_nll
+from kittylm.evaluation.perplexity import perplexity, ppl_is_consistent, stream_nll
 from kittylm.inference.generate import SamplingConfig, generate
 
 __all__ = [
@@ -143,6 +144,9 @@ def nonfinite_metrics(records: Iterable[Mapping[str, Any]]) -> list[str]:
         if isinstance(value, Mapping):
             for sub_key, sub_value in value.items():
                 visit(sub_value, f"{key}.{sub_key}", step)
+        elif isinstance(value, list | tuple):
+            for index, item in enumerate(value):
+                visit(item, f"{key}[{index}]", step)
         elif isinstance(value, bool):
             return
         elif isinstance(value, int | float) and not math.isfinite(value):
@@ -199,7 +203,7 @@ def evaluate_overfit_gate(
     )
     loss = totals.nats / totals.tokens
     loss_finite = math.isfinite(loss)
-    ppl = math.exp(loss) if loss_finite and loss < 700 else math.inf
+    ppl = perplexity(loss) if loss_finite else math.inf
     bpb = totals.bits_per_byte if totals.bytes > 0 and loss_finite else None
 
     prompt, reference = list(ids[: limits.prompt_tokens]), list(ids[limits.prompt_tokens :])

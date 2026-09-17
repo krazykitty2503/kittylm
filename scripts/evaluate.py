@@ -9,7 +9,9 @@ Usage:
 
 Each --doc is one document of the named category, scored with the shared windowing policy
 (D-023). --speed PROMPT,NEW adds batch-1 prefill/decode throughput. The report is printed as
-JSON and optionally written to --out (under runs/ when inside the repository).
+JSON (non-finite numbers as the strings "inf"/"nan") and optionally written to --out (under
+runs/ when inside the repository). Every failure, including an invalid --device or an
+unwritable --out, prints "evaluation failed: ..." and exits 1.
 KittyLM makes no network requests; this script only reads local files.
 """
 
@@ -17,15 +19,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
-
-import torch
+from typing import Any
 
 from kittylm.config import ConfigError
 from kittylm.evaluation.inference_speed import measure_inference_speed
 from kittylm.evaluation.perplexity import Document, evaluate_documents, token_byte_lengths
-from kittylm.inference.loading import LoadError, load_for_inference, precision_dtype
+from kittylm.inference.loading import (
+    LoadError,
+    load_for_inference,
+    precision_dtype,
+    resolve_device,
+)
 from kittylm.training.checkpoint import CheckpointError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +51,17 @@ def parse_speed(value: str) -> tuple[int, int]:
     except ValueError as exc:
         raise argparse.ArgumentTypeError("--speed must be PROMPT_TOKENS,NEW_TOKENS") from exc
     return prompt, new
+
+
+def json_safe(value: Any) -> Any:
+    """Non-finite floats become the strings "inf", "-inf" or "nan" (strict JSON has no inf)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "nan" if math.isnan(value) else ("inf" if value > 0 else "-inf")
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_safe(item) for item in value]
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,8 +83,8 @@ def main(argv: list[str] | None = None) -> int:
         if out.is_relative_to(root) and not out.is_relative_to(root / "runs"):
             print("refusing to write an evaluation report inside the repository outside runs/")
             return 2
-    device = torch.device(args.device)
     try:
+        device = resolve_device(args.device)
         loaded = load_for_inference(
             args.model_config, args.checkpoint, args.tokenizer, device, overrides=args.set
         )
@@ -100,13 +118,13 @@ def main(argv: list[str] | None = None) -> int:
                 "new_tokens": speed.new_tokens,
                 "repeats": speed.repeats,
             }
+        text = json.dumps(json_safe(result), indent=2, sort_keys=True, allow_nan=False)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(text + "\n", encoding="utf-8")
     except (ConfigError, LoadError, CheckpointError, ValueError, OSError) as exc:
         print(f"evaluation failed: {exc}")
         return 1
-    text = json.dumps(result, indent=2, sort_keys=True)
-    if args.out is not None:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(text + "\n", encoding="utf-8")
     print(text)
     return 0
 

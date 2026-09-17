@@ -37,6 +37,8 @@ Invariants:
       repeated save of the same step can never modify the file ``latest.json`` names.
     - Top-level keys are exactly CHECKPOINT_KEYS; metadata keys are exactly METADATA_KEYS
       (a whitelist: no environment variables, paths, hostnames or credentials).
+    - ``model_config_sha256`` is ``config_hash(to_dict(model_config))``: inference loaders
+      recompute it to refuse a model configuration that differs from the trained one.
     - Step checkpoints beyond ``keep_last`` are pruned; the checkpoint named by ``latest.json``
       is never pruned.
 
@@ -76,7 +78,8 @@ __all__ = [
 ]
 
 MAGIC = "kittylm-checkpoint"
-FORMAT_VERSION = 2  # 2: best_val_loss, skipped_steps; content-addressed step files
+# 2: best_val_loss, skipped_steps; content-addressed step files. 3: model_config_sha256.
+FORMAT_VERSION = 3
 CHECKPOINT_KEYS = frozenset(
     {
         "metadata",
@@ -95,6 +98,7 @@ CHECKPOINT_KEYS = frozenset(
 METADATA_KEYS = frozenset(
     {
         "config_hash",
+        "model_config_sha256",
         "tokenizer_sha256",
         "dataset_version",
         "git_commit",

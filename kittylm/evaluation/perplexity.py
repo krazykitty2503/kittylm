@@ -41,14 +41,16 @@ Math:
     ``loss = nats / tokens``; ``ppl = exp(loss)``; ``bpb = nats / (ln 2 * bytes)``.
 
 Invariants:
-    - ``perplexity`` is exactly ``math.exp(mean_loss)`` (no separate estimate that could drift).
+    - ``perplexity`` is exactly ``math.exp(mean_loss)`` (no separate estimate that could drift);
+      a finite loss beyond float range (> ~709.78) gives ``inf`` instead of raising.
     - Byte counts include only ordinary tokens: special tokens (``id >= first_special_id``)
       count 0 bytes, because they do not decode to text; their NLL still counts.
     - The first token of a stream is never predicted and contributes no NLL and no bytes.
 
 Failure modes:
     - ``bits_per_byte`` with zero bytes, ``byte_lengths`` of the wrong length, an empty
-      document list, or a non-finite loss passed to ``perplexity`` raises ValueError.
+      document list, a non-finite loss passed to ``perplexity``, or a ``context_length``
+      override outside ``[1, model context]`` raises ValueError.
     - A model that returns non-finite logits yields non-finite totals; callers (the overfit
       gate) must check ``math.isfinite``.
 
@@ -68,7 +70,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from kittylm.evaluation.windows import evaluation_windows
-from kittylm.inference.runtime import autocast_context, eval_mode, model_config
+from kittylm.inference.runtime import autocast_context, eval_mode, resolve_context_length
 from kittylm.ledger import PPL_REL_TOL
 
 __all__ = [
@@ -97,10 +99,13 @@ class TokenBytes(Protocol):
 
 
 def perplexity(mean_loss: float) -> float:
-    """``exp(mean_loss)``: the perplexity of a mean natural-log cross-entropy."""
+    """``exp(mean_loss)``; ``inf`` when a finite loss exceeds the float range (loss > ~709.78)."""
     if not math.isfinite(mean_loss):
         raise ValueError(f"perplexity is undefined for a non-finite loss ({mean_loss})")
-    return math.exp(mean_loss)
+    try:
+        return math.exp(mean_loss)
+    except OverflowError:
+        return math.inf
 
 
 def bits_per_byte(total_nats: float, n_bytes: int) -> float:
@@ -112,9 +117,12 @@ def bits_per_byte(total_nats: float, n_bytes: int) -> float:
 
 def ppl_is_consistent(loss: float, ppl: float, rel_tol: float = PPL_REL_TOL) -> bool:
     """Whether a recorded ``ppl`` equals ``exp(loss)`` (the ledger's rule)."""
-    if not (math.isfinite(loss) and math.isfinite(ppl)):
+    if not math.isfinite(loss) or math.isnan(ppl):
         return False
-    return math.isclose(ppl, math.exp(loss), rel_tol=rel_tol, abs_tol=0.0)
+    expected = perplexity(loss)
+    if math.isinf(expected) or math.isinf(ppl):
+        return expected == ppl  # both overflow to +inf
+    return math.isclose(ppl, expected, rel_tol=rel_tol, abs_tol=0.0)
 
 
 def token_byte_lengths(tokenizer: TokenBytes, ids: Sequence[int]) -> list[int]:
@@ -199,7 +207,7 @@ def stream_nll(
     """Score every target of ``ids`` once (windowed) and sum NLL, tokens and bytes."""
     if len(byte_lengths) != len(ids):
         raise ValueError("byte_lengths must have one entry per token")
-    ctx = context_length if context_length is not None else model_config(model).context_length
+    ctx = resolve_context_length(model, context_length)
     nats, tokens, n_bytes = 0.0, 0, 0
     with eval_mode(model):
         for window in evaluation_windows(len(ids), ctx, stride):

@@ -151,3 +151,34 @@ def test_compare_loss_series() -> None:
     assert compare_loss_series([1.0, 0.5], [1.0, 0.5 + 1e-6]) == "max_abs_dev=1.000e-06"
     assert compare_loss_series([1.0], [1.0, 2.0]) == "length differs (1 vs 2)"
     assert compare_loss_series([0.0], [-0.0]) == "max_abs_dev=0.000e+00"  # bit-level, not ==
+
+
+def test_nonfinite_values_inside_nested_sequences_are_found() -> None:
+    # Regression (PR #5 review): lists and tuples were not visited, so a NaN inside a logged
+    # sequence left all_values_finite True.
+    records = [
+        {
+            "step": 4,
+            "per_layer": [1.0, math.nan, {"inner": ("ok", "inf")}],
+            "pair": (0.5, -math.inf),
+        },
+        {"step": 5, "per_layer": [1.0, 2.0], "names": ["nan-tolerant", "fine"]},
+    ]
+    assert nonfinite_metrics(records) == [
+        "step 4: per_layer[1]",
+        "step 4: per_layer[2].inner[1]",
+        "step 4: pair[1]",
+    ]
+
+
+def test_nested_nonfinite_metric_fails_the_gate(memorized: KittyLM) -> None:
+    ids = fixture_ids()
+    report = evaluate_overfit_gate(
+        memorized,
+        ids,
+        [1] * len(ids),
+        device=CPU,
+        metrics_records=[{"step": 1, "grad_norm_per_layer": [0.1, math.nan]}],
+    )
+    assert report.failures == ["all_values_finite"]
+    assert report.nonfinite == ("step 1: grad_norm_per_layer[1]",)

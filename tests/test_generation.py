@@ -242,3 +242,30 @@ def test_generation_restores_training_mode_and_records_no_grad() -> None:
     result = generate(model, [1, 2], SamplingConfig(max_new_tokens=3), device=CPU)
     assert model.training and len(result.new_ids) == 3
     assert all(p.grad is None for p in model.parameters())
+
+
+@pytest.mark.parametrize("context_length", [0, TINY_MODEL.context_length + 1, 10**9])
+def test_context_override_is_validated_before_allocating_a_cache(
+    context_length: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (PR #5 review): the override sized the KV cache before the model rejected it.
+    from kittylm.inference import generate as generate_module
+
+    def no_allocation(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("KV cache allocated before the context override was validated")
+
+    monkeypatch.setattr(generate_module.KVCache, "for_config", no_allocation)
+    with pytest.raises(ValueError, match="context_length must be in"):
+        generate(
+            KittyLM(TINY_MODEL),
+            [1, 2],
+            SamplingConfig(max_new_tokens=2),
+            device=CPU,
+            context_length=context_length,
+        )
+
+
+def test_smaller_context_override_is_honoured() -> None:
+    model = Counting(context_length=8)
+    result = generate(model, [0], SamplingConfig(max_new_tokens=10), device=CPU, context_length=4)
+    assert result.new_ids == tuple(range(1, 11)) and all(len(i) <= 4 for i in model.inputs)

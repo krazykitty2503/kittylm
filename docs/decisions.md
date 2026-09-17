@@ -192,7 +192,7 @@ tokenizer uses `1` because its fixture supports only 158 merges at 2 (measured).
 
 ### D-021 — Checkpoint format: checksummed header, safe loading, atomic replace
 
-**Decision.** A checkpoint file (format version 2) is one JSON header line (`magic`, `format_version`,
+**Decision.** A checkpoint file (format version 3) is one JSON header line (`magic`, `format_version`,
 `payload_sha256`, `payload_bytes`) followed by a `torch.save` payload. Writes go to a temporary
 file in the same directory, are fsynced and then renamed with `os.replace`; `latest.json` is
 written the same way and records the file name and payload checksum. Step files are
@@ -200,11 +200,15 @@ content-addressed (`step-XXXXXXXX-<first 16 hex of the payload sha256>.pt`), so 
 again can never modify the file `latest.json` currently names. Loading verifies the magic,
 version, length and checksum before calling `torch.load(weights_only=True)`, so arbitrary pickled
 objects are refused. The top-level keys and the metadata keys (config hash, tokenizer sha256,
-dataset version, git commit/dirty, precision, device type, determinism) are fixed whitelists;
+dataset version, model-config digest, git commit/dirty, precision, device type, determinism) are
+fixed whitelists;
 resume refuses a checkpoint whose config hash, tokenizer or dataset version differs from the run.
 The state includes `best_val_loss` and `skipped_steps`, so a resumed run keeps its best-model
 threshold. A `crash` checkpoint holds the pre-step state, including the loader and RNG snapshots
 taken before the failed step drew its batches, so retrying it replays that step.
+`model_config_sha256` is the digest of the resolved model configuration alone; inference loaders
+recompute it and refuse a configuration that differs from the trained one even when every
+parameter shape still fits (for example a changed `rope_theta` or `norm_eps`).
 **Why.** A crash mid-save must leave the previous checkpoint loadable, corruption must be
 detected rather than silently loaded, a checkpoint must not be able to execute code, and
 environment variables, paths or hostnames cannot leak into a checkpoint through metadata.
@@ -252,7 +256,10 @@ categories are token- and byte-weighted. SMOKE-GPU-001 and EXP-000 use one gate 
 thresholds loss < 0.05, ppl <= 1.05, greedy token match >= 95% from a 16-token prompt, and no
 non-finite values. Generated samples are secret-scanned before persistence: flagged lines are
 replaced by a marker naming the rules (never the value), the result is re-scanned, and only clean
-text is written, atomically.
+text is written, atomically. A finite loss beyond float range reports perplexity `inf` (written
+to JSON as the string `"inf"`). The evaluation and generation CLIs validate the device and the
+context-length override before allocating anything, and report every operational failure
+(missing artifact, unavailable device, unwritable output) as a one-line error with exit code 1.
 **Why.** One definition per metric keeps records comparable and makes `ppl = exp(loss)`
 checkable; a shared gate means a smoke pass predicts the formal gate. A model can emit
 credential-shaped text, and samples must never become a leak path (docs/safety.md).

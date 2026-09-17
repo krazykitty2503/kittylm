@@ -8,6 +8,8 @@ Usage:
 
 Default output: runs/samples/<name>.txt plus <name>.json (redaction summary). Inside the
 repository, samples may only be written under runs/ (gitignored, blocked by the artifact guard).
+Every failure, including a missing artifact, an invalid --device or an unwritable output
+directory, prints "generation failed: ..." and exits 1.
 KittyLM makes no network requests; this script only reads local files.
 """
 
@@ -22,7 +24,12 @@ import torch
 
 from kittylm.config import ConfigError
 from kittylm.inference.generate import SamplingConfig, generate
-from kittylm.inference.loading import LoadError, load_for_inference, precision_dtype
+from kittylm.inference.loading import (
+    LoadError,
+    load_for_inference,
+    precision_dtype,
+    resolve_device,
+)
 from kittylm.inference.samples import SampleSecretError, save_sample
 from kittylm.training.checkpoint import CheckpointError
 
@@ -61,8 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         print(problem)
         return 2
-    device = torch.device(args.device)
     try:
+        device = resolve_device(args.device)
         loaded = load_for_inference(
             args.model_config, args.checkpoint, args.tokenizer, device, overrides=args.set
         )
@@ -85,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             generator=torch.Generator().manual_seed(args.seed),
         )
         saved = save_sample(args.out_dir, args.name, tokenizer.decode(result.ids))
-    except (ConfigError, LoadError, CheckpointError, ValueError, SampleSecretError) as exc:
+    except (ConfigError, LoadError, CheckpointError, ValueError, SampleSecretError, OSError) as exc:
         print(f"generation failed: {exc}")
         return 1
     summary = {

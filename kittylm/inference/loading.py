@@ -12,6 +12,7 @@ Public API:
                        overrides=()) -> LoadedModel
         ``overrides`` are ``key=value`` strings, e.g. ``vocab_size=512`` for the smoke vocabulary.
     precision_dtype(name) -> torch.dtype | None
+    resolve_device(name) -> torch.device
 
 Shapes:
     Not applicable (loads parameters of the configured shapes).
@@ -27,11 +28,14 @@ Invariants:
     - The checkpoint passes the checksum and ``weights_only`` loading of D-021.
     - ``tokenizer.sha256 == metadata["tokenizer_sha256"]`` and
       ``tokenizer.vocab_size == config.vocab_size``.
+    - ``config_hash(to_dict(config)) == metadata["model_config_sha256"]``: the resolved model
+      configuration (after overrides) is exactly the trained one, including fields that do not
+      change parameter shapes.
     - The returned model is in eval mode.
 
 Failure modes:
-    - A config file without ``kind: model``, a tokenizer/vocabulary mismatch, or a checkpoint
-      whose weights do not fit the configuration raises LoadError.
+    - A config file without ``kind: model``, a tokenizer/vocabulary/model-config mismatch, a
+      checkpoint whose weights do not fit, or an invalid/unavailable device raises LoadError.
     - Damaged checkpoints raise CheckpointError (from kittylm/training/checkpoint.py).
 
 See:
@@ -47,13 +51,13 @@ from typing import Any
 
 import torch
 
-from kittylm.config import apply_overrides, from_dict, load_yaml
+from kittylm.config import apply_overrides, config_hash, from_dict, load_yaml, to_dict
 from kittylm.model.config import ModelConfig
 from kittylm.model.transformer import KittyLM
 from kittylm.tokenizer.bpe import BPETokenizer
 from kittylm.training.checkpoint import read_checkpoint
 
-__all__ = ["LoadError", "LoadedModel", "load_for_inference", "precision_dtype"]
+__all__ = ["LoadError", "LoadedModel", "load_for_inference", "precision_dtype", "resolve_device"]
 
 _PRECISIONS: dict[str, torch.dtype | None] = {"fp32": None, "bf16": torch.bfloat16}
 
@@ -80,6 +84,25 @@ def precision_dtype(name: str) -> torch.dtype | None:
     return _PRECISIONS[name]
 
 
+def resolve_device(name: str) -> torch.device:
+    """Parse a device name and check it is usable here (CPU, or an available GPU index)."""
+    try:
+        device = torch.device(name)
+    except (RuntimeError, ValueError) as exc:
+        raise LoadError(f"invalid device {name!r}: {exc}") from exc
+    if device.type == "cpu":
+        return device
+    if device.type != "cuda":
+        raise LoadError(f"unsupported device type {device.type!r} (use cpu or cuda)")
+    if not torch.cuda.is_available():
+        raise LoadError(f"device {name!r} requested but no CUDA/ROCm GPU is available")
+    if device.index is not None and device.index >= torch.cuda.device_count():
+        raise LoadError(
+            f"device {name!r} requested but only {torch.cuda.device_count()} GPU(s) are available"
+        )
+    return device
+
+
 def load_for_inference(
     model_config_path: Path,
     checkpoint_path: Path,
@@ -102,6 +125,13 @@ def load_for_inference(
     metadata = dict(state["metadata"])
     if metadata.get("tokenizer_sha256") != tokenizer.sha256:
         raise LoadError("checkpoint was trained with a different tokenizer (sha256 mismatch)")
+    if metadata.get("model_config_sha256") != config_hash(to_dict(config)):
+        # Shape-compatible changes (rope_theta, norm_eps, attention backend...) would load
+        # silently and change every result, so the resolved config must be the trained one.
+        raise LoadError(
+            f"model configuration {config.name!r} differs from the configuration the checkpoint "
+            "was trained with (model_config_sha256 mismatch)"
+        )
     model = KittyLM(config)
     try:
         model.load_state_dict(state["model"])

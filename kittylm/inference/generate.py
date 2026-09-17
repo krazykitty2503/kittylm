@@ -42,6 +42,8 @@ Invariants:
     - The model's train/eval mode is restored afterwards; no gradients are recorded.
 
 Failure modes:
+    - A ``context_length`` override outside ``[1, model context]`` raises ValueError before the
+      cache is allocated.
     - Invalid sampling settings (negative or non-finite temperature, ``top_p`` outside
       ``(0, 1]``, negative ``top_k`` or ``max_new_tokens``) raise ValueError.
     - An empty prompt raises ValueError.
@@ -61,7 +63,13 @@ import torch
 from torch import nn
 
 from kittylm.evaluation.windows import context_start
-from kittylm.inference.runtime import autocast_context, cache_dtype, eval_mode, model_config
+from kittylm.inference.runtime import (
+    autocast_context,
+    cache_dtype,
+    eval_mode,
+    model_config,
+    resolve_context_length,
+)
 from kittylm.model.kv_cache import KVCache
 
 __all__ = [
@@ -167,7 +175,7 @@ def generate(
         raise ValueError("prompt_ids must contain at least one token")
     prompt = tuple(ids)
     config_of_model = model_config(model)
-    ctx = context_length if context_length is not None else config_of_model.context_length
+    ctx = resolve_context_length(model, context_length)
     new: list[int] = []
     resets = 0
     stop: Literal["eot", "max_new_tokens"] = "max_new_tokens"

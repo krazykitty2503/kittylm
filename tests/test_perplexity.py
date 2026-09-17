@@ -12,6 +12,7 @@ from torch import nn
 
 from kittylm.evaluation.perplexity import (
     Document,
+    EvaluationReport,
     NLLTotals,
     bits_per_byte,
     evaluate_documents,
@@ -165,3 +166,25 @@ def test_argument_validation_and_mode_restored() -> None:
         evaluate_documents(model, [], device=CPU)
     stream_nll(model, [0, 1], [1, 1], device=CPU)
     assert model.training
+
+
+def test_perplexity_beyond_float_range_is_infinite_not_an_error() -> None:
+    # Regression (PR #5 review): exp(loss) overflowed for finite losses above ~709.78 and the
+    # evaluation report raised OverflowError instead of reporting infinite perplexity.
+    assert perplexity(709.0) == math.exp(709.0)
+    assert perplexity(710.0) == math.inf
+    totals = NLLTotals(nats=800.0 * 4, tokens=4, bytes=4)
+    metrics = EvaluationReport(totals, {"prose": totals}).metrics()
+    assert metrics["ppl"] == math.inf and metrics["loss"] == 800.0
+    assert ppl_is_consistent(800.0, math.inf)
+    assert not ppl_is_consistent(800.0, 1e300)
+    assert not ppl_is_consistent(1.0, math.inf)
+    assert not ppl_is_consistent(1.0, math.nan)
+
+
+@pytest.mark.parametrize("context_length", [0, -1, TINY_MODEL.context_length + 1, 10**9])
+def test_context_override_is_bounded_by_the_model(context_length: int) -> None:
+    # Regression (PR #5 review): an oversized override reached window construction unchecked.
+    model = KittyLM(TINY_MODEL)
+    with pytest.raises(ValueError, match="context_length must be in"):
+        stream_nll(model, [1, 2, 3], [1, 1, 1], device=CPU, context_length=context_length)

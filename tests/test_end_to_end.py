@@ -30,7 +30,7 @@ from kittylm.model.config import ModelConfig
 from kittylm.model.transformer import KittyLM
 from kittylm.tokenizer.bpe import BPETokenizer
 from kittylm.tokenizer.trainer import TokenizerConfig, train_from_config
-from kittylm.training.checkpoint import RunIdentity
+from kittylm.training.checkpoint import RunIdentity, read_checkpoint, write_checkpoint
 from kittylm.training.config import TrainingConfig
 from kittylm.training.determinism import seed_everything
 from kittylm.training.engine import RunInfo, TrainingEngine
@@ -228,8 +228,14 @@ def test_loader_refuses_mismatched_artifacts(tmp_path: Path, no_network: list[st
         load_for_inference(
             ROOT / "configs/tokenizer/smoke.yaml", checkpoint, tokenizer_path, CPU, overrides=vocab
         )
-    with pytest.raises(LoadError, match="do not fit"):
+    with pytest.raises(LoadError, match="model_config_sha256 mismatch"):
         load_for_inference(NANO, checkpoint, tokenizer_path, CPU, overrides=[*vocab, "n_layers=2"])
+    state = read_checkpoint(checkpoint)
+    del state["model"]["norm.weight"]  # same configuration identity, incomplete weights
+    incomplete = tmp_path / "incomplete.pt"
+    write_checkpoint(incomplete, state)
+    with pytest.raises(LoadError, match="do not fit"):
+        load_for_inference(NANO, incomplete, tokenizer_path, CPU, overrides=vocab)
 
     generate = load_script("generate")
     assert generate.output_directory_problem(ROOT / "docs") is not None

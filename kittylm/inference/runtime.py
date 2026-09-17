@@ -9,6 +9,7 @@ Public API:
     autocast_context(device, dtype)
     cache_dtype(model, dtype) -> torch.dtype
     model_config(model) -> ModelConfig
+    resolve_context_length(model, context_length) -> int
     synchronize(device)
     eval_mode(model)
 
@@ -29,6 +30,8 @@ Invariants:
 Failure modes:
     - Autocast to a dtype the device does not support raises inside PyTorch.
     - A model without a ``ModelConfig`` ``config`` attribute raises TypeError.
+    - A context override outside ``[1, model context_length]`` raises ValueError before any
+      tensor or cache is allocated.
 
 See:
     kittylm/inference/generate.py, kittylm/evaluation/inference_speed.py.
@@ -44,7 +47,14 @@ from torch import nn
 
 from kittylm.model.config import ModelConfig
 
-__all__ = ["autocast_context", "cache_dtype", "eval_mode", "model_config", "synchronize"]
+__all__ = [
+    "autocast_context",
+    "cache_dtype",
+    "eval_mode",
+    "model_config",
+    "resolve_context_length",
+    "synchronize",
+]
 
 
 @contextlib.contextmanager
@@ -87,3 +97,15 @@ def model_config(model: nn.Module) -> ModelConfig:
     if not isinstance(config, ModelConfig):
         raise TypeError("model must expose its ModelConfig as `.config`")
     return config
+
+
+def resolve_context_length(model: nn.Module, context_length: int | None) -> int:
+    """The context to use: the model's own, or a validated smaller override."""
+    limit = model_config(model).context_length
+    if context_length is None:
+        return limit
+    if not 1 <= context_length <= limit:
+        raise ValueError(
+            f"context_length must be in [1, {limit}] for this model, got {context_length}"
+        )
+    return context_length
