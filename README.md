@@ -28,8 +28,8 @@ required GitHub CI jobs green on that exact commit (D-018).
 | Milestone | Scope | Status |
 |:---:|---|---|
 | Step 1 | Foundation: repo, config system, secret scanner, artifact guard, ledger, CI, docs | done |
-| A | Byte-level BPE tokenizer, smoke tokenizer config, acceptance tests | **in review** |
-| B | Model (LLaMA-style baseline), KV cache, parameter accounting, ROCm attention benchmark (BENCH-ATTN-001) | not started |
+| A | Byte-level BPE tokenizer, smoke tokenizer config, acceptance tests | done |
+| B | Model (LLaMA-style baseline), KV cache, parameter accounting, ROCm attention benchmark (BENCH-ATTN-001), D-014 | **in review** |
 | C | Training engine, checkpoint/resume validation, timing metrics | not started |
 | D | Evaluation, generation, inference speed | not started |
 | E | SMOKE-GPU-001 — engineering-only GPU overfit test (never a quality result) | not started |
@@ -47,16 +47,17 @@ kittylm/            package
   config.py         strict typed YAML configuration
   ledger.py         experiment-record schema, validator, ablation table
   tokenizer/        byte-level BPE: pre-tokenization, training, encode/decode, artifacts
+  model/            decoder-only Transformer, attention paths, KV cache, parameter accounting
   data/secrets.py   secret scanner (data pipeline + repository)
   utils/            git access, artifact guard
   export/           future export boundary (README only)
   integration/      future KittyOS contract + feedback loop (README only)
 scripts/            check.py (local == CI), scan_secrets.py, build_ablation_table.py,
-                    train_tokenizer.py
+                    train_tokenizer.py, bench_attention.py
 tests/              foundation, tokenizer acceptance and reference-trainer tests
 tests/fixtures/     hand-written smoke corpus
-experiments/        experiment records and the generated ablation table
-configs/            tokenizer/smoke.yaml (engineering smoke tokenizer)
+experiments/        experiment records, benchmarks (BENCH-ATTN-001) and the generated ablation table
+configs/            tokenizer/smoke.yaml, model/nano.yaml, model/tiny.yaml
 docs/               architecture, decisions, discrepancies, safety, limitations, scaling, backlog
 .github/            CI workflows, templates, CODEOWNERS, Dependabot
 .githooks/          pre-commit hook (secret scan + artifact guard)

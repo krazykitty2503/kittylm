@@ -1,0 +1,14 @@
+kind: model
+name: nano
+# Formal runs use the 16,384 tokenizer; SMOKE-GPU-001 overrides vocab_size to its 512-token
+# smoke vocabulary (Milestone E).
+vocab_size: 16384
+d_model: 128
+n_layers: 4
+n_heads: 4
+# 8/3 * d_model rounded up to a multiple of 64 (same rule gives tiny's 1024).
+ffn_dim: 384
+context_length: 256
+# D-014 (BENCH-ATTN-001): the reference implementation was the fastest equivalent bf16 path on the
+# RX 9060 XT / ROCm stack; no fused SDPA kernel was usable. No environment flag is required.
+attention_backend: reference

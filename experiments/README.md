@@ -27,7 +27,7 @@ committed.
 
 | ID | Kind | Purpose | Status |
 |---|---|---|---|
-| BENCH-ATTN-001 | benchmark | ROCm attention paths × sequence lengths: throughput, VRAM, failures (Milestone B) | not run |
+| BENCH-ATTN-001 | benchmark | ROCm attention paths × sequence lengths: throughput, VRAM, failures (Milestone B) | **done** — `BENCH-ATTN-001/benchmark.yaml`; decided D-014 (`reference@bf16`, flag unset) |
 | SMOKE-GPU-001 | smoke | Engineering-only GPU overfit test with a 512 smoke tokenizer; never a model-quality result (Milestone E, D-017) | not run |
 | EXP-000 | formal | Overfit gate: Nano model memorizes a tiny fixture with the real 16,384 tokenizer | not run |
 | EXP-001 | formal | Baseline dense Transformer, vocab 16,384 | not run |
@@ -35,3 +35,11 @@ committed.
 
 Formal experiments require the required GitHub CI jobs to be green on the exact commit they run
 on (D-018).
+
+## Benchmarks
+
+Engineering measurements live in `experiments/BENCH-<AREA>-###/benchmark.yaml` and are validated
+by `kittylm.ledger`: the grid must be complete (every variant × flag setting × length), every
+non-ok cell must explain itself, and the recorded selection must equal the selection recomputed
+from the cells. Benchmarks never appear in the ablation table. A changed software/hardware stack
+gets a new benchmark id rather than an edited file.

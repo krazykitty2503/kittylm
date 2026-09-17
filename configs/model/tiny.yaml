@@ -1,0 +1,10 @@
+kind: model
+name: tiny
+vocab_size: 16384
+d_model: 384
+n_layers: 6
+n_heads: 6
+ffn_dim: 1024
+context_length: 1024
+# D-014 (BENCH-ATTN-001): see configs/model/nano.yaml.
+attention_backend: reference

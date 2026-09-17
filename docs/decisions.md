@@ -97,9 +97,31 @@ produced by `kittylm.training.resume_harness` (kill step, resumed step, metrics 
 PyTorch build must satisfy runtime requirements without being replaced. Dependabot proposes
 upgrades.
 
-### D-014 — Attention kernel selection (reserved)
+### D-014 — Attention kernel: the `reference` implementation (bf16, no experimental flag)
 
-Reserved for the ROCm attention path chosen from BENCH-ATTN-001 in Milestone B. Not decided yet.
+**Decision.** `nano` and `tiny` use `attention_backend: reference`, with
+`TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL` unset. The `reference` path stays the correctness oracle;
+on this hardware it is also the production path.
+**Evidence.** `experiments/BENCH-ATTN-001/benchmark.yaml`, measured on a clean checkout of
+`da91fdb` (AMD Radeon RX 9060 XT, ROCm/HIP 7.15, PyTorch 2.13.0+rocm10.0.0), 72 cells:
+- flash, memory-efficient and cuDNN SDPA kernels are *unsupported* with the flag unset, and
+  flash/memory-efficient fail with `CUDA error: invalid argument` at every length with the flag
+  set; cuDNN is unsupported in both settings;
+- `sdpa_math` works and matches the bf16 reference within the 1e-2 relative tolerance, but is
+  slower and uses more memory: at T=1024 (tiny's context) 375k vs 555k tokens/s and 1,820 vs
+  993 MiB peak; at T=256 810k vs 1,169k tokens/s.
+
+The selection is recomputed from the cells by the ledger validator (rule: fastest bf16 variant
+that is ok and equivalent at every selection length, 256 and 1024, for one flag setting; exact
+ties prefer the flag unset).
+**Trade-off.** Both working paths materialize the full T×T attention matrix, so memory grows
+quadratically (6.4 GB peak at T=8192, batch 2). That is acceptable for 0.1 contexts (≤ 1024) but
+is a limit for long-context work. Revisit when the PyTorch/ROCm stack or GPU changes: rerun the
+benchmark (as a new BENCH id) before switching kernels.
+**Known limit of the rule.** Throughput is a single measurement window per cell; the flag-
+independent reference path varied by up to ~10% between flag runs (and one T=2048 window
+stalled). A near-tie between flag settings could therefore be decided by noise; this run's choice
+does not depend on the flag.
 
 ### D-015 — Model-first milestone order
 

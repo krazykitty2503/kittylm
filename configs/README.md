@@ -12,6 +12,10 @@ as a string. Command-line overrides (`key.path=3e-4`) are parsed as numbers.
 | Kind | Schema | Files |
 |---|---|---|
 | `tokenizer` | `kittylm.tokenizer.trainer.TokenizerConfig` | `tokenizer/smoke.yaml` |
+| `model` | `kittylm.model.config.ModelConfig` | `model/nano.yaml`, `model/tiny.yaml` |
+
+Model configs: `ffn_dim` is 8/3 · `d_model` rounded up to a multiple of 64 (nano 384, tiny 1024);
+`attention_backend` follows D-014 (`reference`, chosen by BENCH-ATTN-001).
 
 `tokenizer/smoke.yaml` is the engineering-only SMOKE-GPU-001 vocabulary (512 ids). It uses
 `min_pair_count: 1` because its small fixture supports only 158 merges at the research default of
@@ -21,4 +25,4 @@ Vocabulary floors: the trainer itself accepts the theoretical minimum of 288 ids
 special tokens), but `kind: tokenizer` configs must also be a multiple of 64 (D-002), so 320 is
 the smallest valid configured `vocab_size`.
 
-Data recipes, model and experiment configs arrive with Milestones B–G.
+Data recipes and experiment configs arrive with Milestones C–G.
