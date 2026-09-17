@@ -77,7 +77,7 @@ from typing import Any, Literal
 import torch
 from torch import nn
 
-from kittylm.config import to_dict
+from kittylm.config import config_hash, to_dict
 from kittylm.data.loader import Batch, TrainWindowSampler
 from kittylm.ledger import CiEvidence, ci_evidence_problems
 from kittylm.model.accounting import count_parameters
@@ -210,6 +210,7 @@ class TrainingEngine:
     def _metadata(self) -> dict[str, Any]:
         return {
             "config_hash": self.identity.config_hash,
+            "model_config_sha256": config_hash(to_dict(self.model_config)),
             "tokenizer_sha256": self.identity.tokenizer_sha256,
             "dataset_version": self.identity.dataset_version,
             "git_commit": self.run.git_commit,

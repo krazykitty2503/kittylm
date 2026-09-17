@@ -15,7 +15,7 @@ import pytest
 
 from tests.conftest import ROOT
 
-MAJOR_SUBPACKAGES = ("tokenizer", "data", "model", "training", "evaluation")
+MAJOR_SUBPACKAGES = ("tokenizer", "data", "model", "training", "evaluation", "inference")
 BASE_SECTIONS = ("Purpose:", "Public API:", "Invariants:", "Failure modes:", "See:")
 TENSOR_SECTIONS = ("Shapes:", "Dtype:", "Device:")
 

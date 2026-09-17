@@ -192,7 +192,7 @@ tokenizer uses `1` because its fixture supports only 158 merges at 2 (measured).
 
 ### D-021 — Checkpoint format: checksummed header, safe loading, atomic replace
 
-**Decision.** A checkpoint file (format version 2) is one JSON header line (`magic`, `format_version`,
+**Decision.** A checkpoint file (format version 3) is one JSON header line (`magic`, `format_version`,
 `payload_sha256`, `payload_bytes`) followed by a `torch.save` payload. Writes go to a temporary
 file in the same directory, are fsynced and then renamed with `os.replace`; `latest.json` is
 written the same way and records the file name and payload checksum. Step files are
@@ -200,11 +200,15 @@ content-addressed (`step-XXXXXXXX-<first 16 hex of the payload sha256>.pt`), so 
 again can never modify the file `latest.json` currently names. Loading verifies the magic,
 version, length and checksum before calling `torch.load(weights_only=True)`, so arbitrary pickled
 objects are refused. The top-level keys and the metadata keys (config hash, tokenizer sha256,
-dataset version, git commit/dirty, precision, device type, determinism) are fixed whitelists;
+dataset version, model-config digest, git commit/dirty, precision, device type, determinism) are
+fixed whitelists;
 resume refuses a checkpoint whose config hash, tokenizer or dataset version differs from the run.
 The state includes `best_val_loss` and `skipped_steps`, so a resumed run keeps its best-model
 threshold. A `crash` checkpoint holds the pre-step state, including the loader and RNG snapshots
 taken before the failed step drew its batches, so retrying it replays that step.
+`model_config_sha256` is the digest of the resolved model configuration alone; inference loaders
+recompute it and refuse a configuration that differs from the trained one even when every
+parameter shape still fits (for example a changed `rope_theta` or `norm_eps`).
 **Why.** A crash mid-save must leave the previous checkpoint loadable, corruption must be
 detected rather than silently loaded, a checkpoint must not be able to execute code, and
 environment variables, paths or hostnames cannot leak into a checkpoint through metadata.
@@ -222,3 +226,45 @@ a formal run without such evidence or from a dirty working tree.
 **Why.** Formal results must be traceable to code that required CI verified (D-018).
 **Limit.** Like D-012 this is structural: evidence could be hand-written, but it names a run id
 anyone can check on GitHub.
+
+### D-023 — One windowing policy for streams longer than the context
+
+**Decision.** A token stream of `N` tokens is scored with windows starting at multiples of a
+stride `S` (default `context // 2`). Each window holds up to `context + 1` tokens (the last one
+may be shorter; nothing is padded) and scores only targets not scored by an earlier window, so
+every target `1 .. N-1` is scored exactly once. The start of the context used for target `t` is
+`S * max(0, ceil((t - context) / S))`; generation resets and re-fills its KV cache at exactly
+those starts, so evaluation, the overfit gate and generation condition every prediction on the
+same context. For the 477-token smoke fixture and Nano's 256-token context this gives windows
+starting at 0, 128 and 256, scoring 256 + 128 + 92 = 476 targets.
+**Why.** The fixture is longer than the model context (measured: 477 tokens with the smoke-512
+tokenizer). Changing the tokenizer or truncating the fixture would hide that; an ad-hoc choice
+per consumer would make loss, token match and generation measure different things. Half-context
+stride keeps at least `context / 2` tokens of history for every prediction after the first window.
+**Limit.** Predictions right after a reset see only `S` tokens of history, so windowed loss is
+slightly higher than an infinite-context model would achieve. Training for SMOKE-GPU-001 and
+EXP-000 must use the same windows (Milestone E) for the gate to measure memorization of exactly
+these contexts.
+
+### D-024 — Evaluation units and generated-sample safety
+
+**Decision.** Loss is the mean natural-log cross-entropy over predicted tokens; perplexity is
+computed only as `exp(loss)`; bits-per-byte divides total NLL in bits by the UTF-8 bytes of the
+predicted tokens, where special tokens count 0 bytes and the first token of a document (never
+predicted) counts neither NLL nor bytes. Totals are summed before dividing, so documents and
+categories are token- and byte-weighted. SMOKE-GPU-001 and EXP-000 use one gate function with
+thresholds loss < 0.05, ppl <= 1.05, greedy token match >= 95% from a 16-token prompt, and no
+non-finite values. Generated samples are secret-scanned before persistence: flagged lines are
+replaced by a marker naming the rules (never the value), the result is re-scanned, and only clean
+text is written, atomically. A finite loss beyond float range reports perplexity `inf` (written
+to JSON as the string `"inf"`). The evaluation and generation CLIs validate the device and the
+context-length override before allocating anything, and report every operational failure
+(missing artifact, unavailable device, unwritable output) as a one-line error with exit code 1.
+**Why.** One definition per metric keeps records comparable and makes `ppl = exp(loss)`
+checkable; a shared gate means a smoke pass predicts the formal gate. A model can emit
+credential-shaped text, and samples must never become a leak path (docs/safety.md).
+**Limit.** Cross-entropy runs on float32 logits (agreement with hand-computed values to about
+1e-7 relative). Independently sampled bf16 GPU runs can diverge after bf16 rounding flips a
+random draw, so KV-cache equivalence in bf16 is verified teacher-forced (measured max logit
+deviation 1.6e-2; greedy 7.8e-3 with identical tokens); fp32 cached and full-forward decoding
+agree within 1.4e-6.
